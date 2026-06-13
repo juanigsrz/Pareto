@@ -261,17 +261,17 @@ for u in users:
 swaps = list(edge_vars.values())
 buys = list(buy.values())
 
-_time_limit = os.environ.get("FTM_TIME_LIMIT")
+_time_limit = os.environ.get("PARETO_TIME_LIMIT")
 if _time_limit:
     model.Params.TimeLimit = float(_time_limit)
-if os.environ.get("FTM_MIPGAP"):
-    model.Params.MIPGap = float(os.environ["FTM_MIPGAP"])
+if os.environ.get("PARETO_MIPGAP"):
+    model.Params.MIPGap = float(os.environ["PARETO_MIPGAP"])
 
 # Per-user participation vars: a user participates if they receive any item (swap take or cash
 # buy) or give an owned item away (it leaves via swap or cash sale). Used for the 'users' KPI
 # and the users_traded report; skip the work when neither is requested.
 participation = {}
-if _args.kpi == "users" or os.environ.get("FTM_STATS"):
+if _args.kpi == "users" or os.environ.get("PARETO_STATS"):
     for u in users:
         part = [v for _, v in spend_swap.get(u, [])]      # receive via swap
         part += [v for _, v in buys_by_user.get(u, [])]   # receive via cash
@@ -299,7 +299,7 @@ status = _STATUS.get(model.Status, f"Status{model.Status}")
 if status != "Optimal":
     print(f"WARNING: solver status is {status}", file=sys.stderr)
 
-if os.environ.get("FTM_STATS"):
+if os.environ.get("PARETO_STATS"):
     obj = model.ObjVal if model.SolCount > 0 else float("nan")
     gap = model.MIPGap if model.SolCount > 0 else float("nan")
     users_traded = (sum(1 for part in participation.values() if any(v.X > 0.5 for v in part))

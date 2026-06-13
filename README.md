@@ -53,9 +53,9 @@ Options and environment variables:
 |---|---|
 | `--kpi trades` | Objective: maximize total trades (default). |
 | `--kpi users` | Objective: maximize number of users with ≥ 1 trade. |
-| `FTM_TIME_LIMIT` | Solver time limit, seconds. |
-| `FTM_MIPGAP` | Accept a solution within this relative MIP gap. |
-| `FTM_STATS` | Print a `STATS …` line (vars, objective, gap, runtime) to stderr. |
+| `PARETO_TIME_LIMIT` | Solver time limit, seconds. |
+| `PARETO_MIPGAP` | Accept a solution within this relative MIP gap. |
+| `PARETO_STATS` | Print a `STATS …` line (vars, objective, gap, runtime) to stderr. |
 
 
 ## Input format

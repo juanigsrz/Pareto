@@ -28,7 +28,7 @@ def run_one(cfg, time_limit):
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
         f.write(text)
         path = f.name
-    env = dict(os.environ, FTM_STATS="1", FTM_TIME_LIMIT=str(time_limit))
+    env = dict(os.environ, PARETO_STATS="1", PARETO_TIME_LIMIT=str(time_limit))
     t0 = time.perf_counter()
     try:
         r = subprocess.run([PY, MAIN, path], env=env, capture_output=True,
