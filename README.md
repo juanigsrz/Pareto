@@ -202,3 +202,48 @@ python benchmark.py --money 0.6 --users 10 50 100 200 --time-limit 60
 density; `benchmark.py` runs the sweep and tabulates variable counts, solver
 runtime, and wall time, stopping once a solve no longer proves optimality in
 time.
+
+
+## Hosted service (Modal)
+
+Pareto runs on [Modal](https://modal.com) as an HTTP service backed by a Gurobi
+WLS license. The worker uses `cpu=8` and `Threads=8` (optimal for the
+single-strategy solve; more threads only help when running multiple Gurobi
+strategies). The endpoint requires Modal proxy auth.
+
+The solver core is shared: `pareto_core.solve()` (parse → build → optimize →
+`Result`) is rendered by `serialize.to_text` for the CLI and `serialize.to_dict`
+for the service. `modal_app.py` is the Modal app.
+
+### Deploy
+
+```bash
+pip install modal
+modal token new                       # one-time auth
+modal secret create gurobi-wls \      # your WLS credentials
+  WLSACCESSID=<id> WLSSECRET=<secret> LICENSEID=<licid>
+modal deploy modal_app.py
+```
+
+### API
+
+Submit a job (async), then poll for the result. Both calls need proxy-auth
+headers `Modal-Key` / `Modal-Secret`.
+
+```bash
+# POST /solve  -> 202 {"job_id": "..."}
+curl -X POST "$URL/solve" -H "Modal-Key: …" -H "Modal-Secret: …" \
+  -H "Content-Type: application/json" \
+  -d '{"instance":"<instance text>","kpi":"trades,users","time_limit":60,"stats":true}'
+
+# GET /result/{job_id} -> {"status":"pending"} | {"status":"done","result":{…}} | {"status":"error",…}
+curl "$URL/result/<job_id>" -H "Modal-Key: …" -H "Modal-Secret: …"
+```
+
+Request fields: `instance` (required, the instance file text), `kpi`
+(comma-separated or list; default `trades`), `time_limit` (seconds, ≤ 600),
+`mipgap`, `stats` (bool). Response `result` mirrors the CLI output as JSON:
+`swaps`, `combo_trades`, `cash_purchases`, `cash_summary`, `payments`,
+`settlement`, plus `status`, `money_present`, and (when `stats`) `stats`.
+
+Local development: `modal serve modal_app.py` gives a hot-reloading temporary URL.
