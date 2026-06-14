@@ -91,6 +91,26 @@ def test_bad_latitude_rejected():
     assert "latitude" in (p.stderr + p.stdout)
 
 
+def subprocess_with_stats(text, kpi):
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write(text)
+        path = f.name
+    try:
+        env = dict(os.environ, PARETO_STATS="1")
+        return subprocess.run(
+            [sys.executable, MAIN, path, "--kpi", kpi],
+            capture_output=True, text=True, check=True, env=env,
+        )
+    finally:
+        os.unlink(path)
+
+
+def test_stats_multi_objective():
+    p = subprocess_with_stats(SWAP, "trades,users")
+    assert "STATS" in p.stderr, p.stderr
+    assert "obj[trades=" in p.stderr and "users=" in p.stderr, p.stderr
+
+
 if __name__ == "__main__":
     test_multi_kpi_runs()
     test_invalid_kpi_rejected()
@@ -98,4 +118,5 @@ if __name__ == "__main__":
     test_distance_picks_closer_seller()
     test_lexicographic_order_changes_outcome()
     test_bad_latitude_rejected()
+    test_stats_multi_objective()
     print("OK: kpi list tests passed")

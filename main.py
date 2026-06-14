@@ -394,14 +394,26 @@ if status != "Optimal":
     print(f"WARNING: solver status is {status}", file=sys.stderr)
 
 if os.environ.get("PARETO_STATS"):
-    obj = model.ObjVal if model.SolCount > 0 else float("nan")
-    gap = model.MIPGap if model.SolCount > 0 else float("nan")
+    have = model.SolCount > 0
     users_traded = (sum(1 for part in participation.values() if any(v.X > 0.5 for v in part))
-                    if model.SolCount > 0 else 0)
+                    if have else 0)
+    # ObjVal / MIPGap are unavailable under multi-objective; report per-objective
+    # values instead (distance is reported negated, i.e. in maximize form).
+    if len(_args.kpi) == 1:
+        obj_str = f"obj={model.ObjVal:.0f}" if have else "obj=nan"
+        gap = f"{model.MIPGap:.4f}" if have else "nan"
+    else:
+        parts = []
+        for k, kpi in enumerate(_args.kpi):
+            model.params.ObjNumber = k
+            val = f"{model.ObjNVal:.0f}" if have else "nan"
+            parts.append(f"{kpi}={val}")
+        obj_str = "obj[" + ",".join(parts) + "]"
+        gap = "nan"
     print(
         f"STATS swap_vars={len(swaps)} buy_vars={len(buys)} combos={len(combo_records)} "
         f"items={len(real_item_ids)} users_traded={users_traded}/{len(users)} "
-        f"status={status} obj={obj:.0f} gap={gap:.4f} runtime={model.Runtime:.3f}",
+        f"status={status} {obj_str} gap={gap} runtime={model.Runtime:.3f}",
         file=sys.stderr,
     )
 
