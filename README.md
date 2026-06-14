@@ -22,8 +22,9 @@ solves it to proven optimality with [Gurobi](https://www.gurobi.com/).
   another).
 - **Duplicate protection (`dupcap`)** — a user receives at most one copy of a
   given game, counting swap receipts and cash buys together.
-- **Two objectives** — maximize total trades (default) or maximize the number of
-  users who get at least one trade.
+- **Lexicographic objectives** — `--kpi` takes a priority-ordered list (e.g.
+  `trades,users`); each objective is optimized in turn. Available KPIs: total
+  trades, participating users, and total shipping `distance` (minimized).
 
 
 ## Requirements
@@ -51,8 +52,7 @@ Options and environment variables:
 
 | Flag / Env | Effect |
 |---|---|
-| `--kpi trades` | Objective: maximize total trades (default). |
-| `--kpi users` | Objective: maximize number of users with ≥ 1 trade. |
+| `--kpi <list>` | Comma-separated objectives in priority order (leftmost first), e.g. `--kpi trades,users`. Choices: `trades` = max total trades (default); `users` = max users with ≥ 1 trade; `distance` = min total shipping distance (km). |
 | `PARETO_TIME_LIMIT` | Solver time limit, seconds. |
 | `PARETO_MIPGAP` | Accept a solution within this relative MIP gap. |
 | `PARETO_STATS` | Print a `STATS …` line (vars, objective, gap, runtime) to stderr. |
@@ -85,6 +85,7 @@ Listing an item on the *give* side declares the user as its owner.
 item <name> owner <user> [ask <price>]   # declare ownership; optional sale price
 bid  <user> <item> <max_price>           # user will pay up to max_price in cash
 user <name> budget <amount>              # net-spend cap (absent => unlimited)
+location <user> <lat> <lng>              # user location for the distance KPI
 ```
 
 A bid creates a cash edge only when it clears the ask (`max_price >= ask`) and
@@ -98,6 +99,17 @@ dupcap <user> <item...>     # user receives at most ONE of these copies
 
 Use it when several listed items are copies of the *same* game and the user
 wants only one, regardless of whether it arrives by swap or by cash.
+
+### Locations (distance KPI)
+
+```
+location <user> <lat> <lng>     # e.g. location trader01 -61.3902 34.2251
+```
+
+Used only by `--kpi distance`. Each item move ships the item from its owner to
+the receiver; the `distance` objective minimizes the sum of those great-circle
+distances (haversine, integer km). A move whose owner or receiver has no
+`location` contributes 0.
 
 
 ## Output
@@ -149,8 +161,9 @@ Pareto builds one MIP:
   something in the same plan (cash chains).
 - `dupcap` adds one constraint summing a user's swap-receive and buy indicators
   over the protected copies to ≤ 1.
-- The objective maximizes total moves (`--kpi trades`) or distinct participating
-  users (`--kpi users`).
+- KPIs combine lexicographically (Gurobi hierarchical multi-objective): `trades`
+  maximizes total moves, `users` maximizes distinct participants, `distance`
+  minimizes total owner→receiver shipping km. List order sets priority.
 
 Objective coefficients are kept integer on purpose: fractional tie-breaks defeat
 Gurobi's integer-bound rounding and make proving optimality much slower.

@@ -1,6 +1,7 @@
 import sys
 import os
 import re
+import math
 import argparse
 import gurobipy as gp
 from gurobipy import GRB
@@ -14,6 +15,7 @@ owner = {}    # item_id -> user (the original owner)
 ask = {}      # item_id -> Z_i (absent => 0)
 bids = {}     # (user, item_id) -> Y_ui (max cash the user will pay)
 dup_groups = []  # list of (user, [item_id, ...]); user receives <=1 of these copies
+location = {}  # user -> (lat, lng) in degrees
 
 
 def intern(token):
@@ -70,6 +72,8 @@ def parse_file(_file):
             m_item = re.fullmatch(r'item\s+(\S+)\s+owner\s+(\S+)(?:\s+ask\s+(\d+))?', line)
             m_bid = re.fullmatch(r'bid\s+(\S+)\s+(\S+)\s+(\d+)', line)
             m_dup = re.fullmatch(r'dupcap\s+(\S+)\s+(.+)', line)
+            m_loc = re.fullmatch(
+                r'location\s+(\S+)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)', line)
 
             if m_user:
                 users.add(m_user.group(1))
@@ -90,6 +94,16 @@ def parse_file(_file):
                 u = m_dup.group(1)
                 users.add(u)
                 dup_groups.append((u, [intern(t) for t in m_dup.group(2).split()]))
+            elif m_loc:
+                u = m_loc.group(1)
+                lat = float(m_loc.group(2))
+                lng = float(m_loc.group(3))
+                if not (-90 <= lat <= 90):
+                    raise ValueError(f"latitude out of range [-90, 90]: {raw}")
+                if not (-180 <= lng <= 180):
+                    raise ValueError(f"longitude out of range [-180, 180]: {raw}")
+                users.add(u)
+                location[u] = (lat, lng)
             elif ':' in line:
                 u, _, body = line.partition(':')
                 u = u.strip()
@@ -104,9 +118,31 @@ def parse_file(_file):
 
 _argp = argparse.ArgumentParser()
 _argp.add_argument("file")
-_argp.add_argument("--kpi", choices=["trades", "users"], default="trades",
-                   help="objective: 'trades' = max total trades (default); "
-                        "'users' = max number of users with >= 1 trade")
+ALLOWED_KPIS = ("trades", "users", "distance")
+
+
+def parse_kpi_list(s):
+    """Comma-separated KPIs in priority order, e.g. 'trades,users'."""
+    kpis = []
+    for tok in s.split(","):
+        tok = tok.strip()
+        if not tok:
+            raise argparse.ArgumentTypeError("empty KPI in --kpi list")
+        if tok not in ALLOWED_KPIS:
+            raise argparse.ArgumentTypeError(
+                f"invalid KPI '{tok}' (choose from {', '.join(ALLOWED_KPIS)})")
+        if tok in kpis:
+            raise argparse.ArgumentTypeError(f"duplicate KPI '{tok}'")
+        kpis.append(tok)
+    return kpis
+
+
+_argp.add_argument("--kpi", type=parse_kpi_list, default=["trades"],
+                   help="comma-separated objectives in priority order "
+                        "(leftmost optimized first), e.g. 'trades,users'. "
+                        "Choices: 'trades' = max total trades (default); "
+                        "'users' = max users with >= 1 trade; "
+                        "'distance' = min total shipping distance (km).")
 _args = _argp.parse_args()
 parse_file(_args.file)
 
@@ -270,8 +306,9 @@ if os.environ.get("PARETO_MIPGAP"):
 # Per-user participation vars: a user participates if they receive any item (swap take or cash
 # buy) or give an owned item away (it leaves via swap or cash sale). Used for the 'users' KPI
 # and the users_traded report; skip the work when neither is requested.
+need_participation = ("users" in _args.kpi) or os.environ.get("PARETO_STATS")
 participation = {}
-if _args.kpi == "users" or os.environ.get("PARETO_STATS"):
+if need_participation:
     for u in users:
         part = [v for _, v in spend_swap.get(u, [])]      # receive via swap
         part += [v for _, v in buys_by_user.get(u, [])]   # receive via cash
@@ -281,17 +318,74 @@ if _args.kpi == "users" or os.environ.get("PARETO_STATS"):
         if part:
             participation[u] = part
 
-if _args.kpi == "users":
-    # Maximize number of users with >= 1 trade.
-    traded = []
+# 'users' KPI: one binary per user that can be 1 only if the user has >= 1 trade.
+traded = []
+if "users" in _args.kpi:
     for u, part in participation.items():
         t = model.addVar(vtype=GRB.BINARY)
         model.addConstr(t <= gp.quicksum(part))
         traded.append(t)
-    model.setObjective(gp.quicksum(traded), GRB.MAXIMIZE)
+
+
+_dist_cache = {}
+
+
+def haversine_km(a, b):
+    """Great-circle distance in integer km between (lat, lng) points a and b."""
+    key = (a, b) if a <= b else (b, a)
+    if key in _dist_cache:
+        return _dist_cache[key]
+    (lat1, lon1), (lat2, lon2) = a, b
+    r1, r2 = math.radians(lat1), math.radians(lat2)
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    h = math.sin(dlat / 2) ** 2 + math.cos(r1) * math.cos(r2) * math.sin(dlon / 2) ** 2
+    km = round(2 * 6371 * math.asin(math.sqrt(h)))
+    _dist_cache[key] = km
+    return km
+
+
+def distance_terms():
+    """(coeff, var) for every item move: ship take-item from owner to receiver.
+    Skips moves with an unknown owner or a missing location on either end."""
+    terms = []
+
+    def add(receiver, take_iid, var):
+        o = owner.get(take_iid)
+        if o is None or receiver not in location or o not in location:
+            return
+        d = haversine_km(location[o], location[receiver])
+        if d:
+            terms.append((d, var))
+
+    for u, legs in spend_swap.items():          # swap receive-legs (simple + combo)
+        for iid, v in legs:
+            add(u, iid, v)
+    for (u, iid), v in buy.items():             # cash buys
+        add(u, iid, v)
+    return terms
+
+
+def kpi_expr(kpi):
+    """Objective expression in MAXIMIZE form for one KPI."""
+    if kpi == "trades":
+        return gp.quicksum(swaps) + gp.quicksum(buys)
+    if kpi == "users":
+        return gp.quicksum(traded)
+    if kpi == "distance":
+        return -gp.quicksum(c * v for c, v in distance_terms())
+    raise ValueError(f"unknown KPI: {kpi}")
+
+
+# Lexicographic multi-objective: leftmost KPI = highest priority. All objectives
+# share ModelSense; min-objectives (distance) are negated into maximize form.
+model.ModelSense = GRB.MAXIMIZE
+if len(_args.kpi) == 1:
+    model.setObjective(kpi_expr(_args.kpi[0]), GRB.MAXIMIZE)
 else:
-    # Maximize total trades (swap item-moves + cash purchases).
-    model.setObjective(gp.quicksum(buys) + gp.quicksum(swaps), GRB.MAXIMIZE)
+    n = len(_args.kpi)
+    for k, kpi in enumerate(_args.kpi):
+        model.setObjectiveN(kpi_expr(kpi), index=k, priority=n - k)
 model.optimize()
 
 _STATUS = {GRB.OPTIMAL: "Optimal", GRB.TIME_LIMIT: "TimeLimit", GRB.INFEASIBLE: "Infeasible"}
@@ -300,14 +394,26 @@ if status != "Optimal":
     print(f"WARNING: solver status is {status}", file=sys.stderr)
 
 if os.environ.get("PARETO_STATS"):
-    obj = model.ObjVal if model.SolCount > 0 else float("nan")
-    gap = model.MIPGap if model.SolCount > 0 else float("nan")
+    have = model.SolCount > 0
     users_traded = (sum(1 for part in participation.values() if any(v.X > 0.5 for v in part))
-                    if model.SolCount > 0 else 0)
+                    if have else 0)
+    # ObjVal / MIPGap are unavailable under multi-objective; report per-objective
+    # values instead (distance is reported negated, i.e. in maximize form).
+    if len(_args.kpi) == 1:
+        obj_str = f"obj={model.ObjVal:.0f}" if have else "obj=nan"
+        gap = f"{model.MIPGap:.4f}" if have else "nan"
+    else:
+        parts = []
+        for k, kpi in enumerate(_args.kpi):
+            model.params.ObjNumber = k
+            val = f"{model.ObjNVal:.0f}" if have else "nan"
+            parts.append(f"{kpi}={val}")
+        obj_str = "obj[" + ",".join(parts) + "]"
+        gap = "nan"
     print(
         f"STATS swap_vars={len(swaps)} buy_vars={len(buys)} combos={len(combo_records)} "
         f"items={len(real_item_ids)} users_traded={users_traded}/{len(users)} "
-        f"status={status} obj={obj:.0f} gap={gap:.4f} runtime={model.Runtime:.3f}",
+        f"status={status} {obj_str} gap={gap} runtime={model.Runtime:.3f}",
         file=sys.stderr,
     )
 
