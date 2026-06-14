@@ -1,6 +1,7 @@
 import sys
 import os
 import re
+import math
 import argparse
 import gurobipy as gp
 from gurobipy import GRB
@@ -14,6 +15,7 @@ owner = {}    # item_id -> user (the original owner)
 ask = {}      # item_id -> Z_i (absent => 0)
 bids = {}     # (user, item_id) -> Y_ui (max cash the user will pay)
 dup_groups = []  # list of (user, [item_id, ...]); user receives <=1 of these copies
+location = {}  # user -> (lat, lng) in degrees
 
 
 def intern(token):
@@ -70,6 +72,8 @@ def parse_file(_file):
             m_item = re.fullmatch(r'item\s+(\S+)\s+owner\s+(\S+)(?:\s+ask\s+(\d+))?', line)
             m_bid = re.fullmatch(r'bid\s+(\S+)\s+(\S+)\s+(\d+)', line)
             m_dup = re.fullmatch(r'dupcap\s+(\S+)\s+(.+)', line)
+            m_loc = re.fullmatch(
+                r'location\s+(\S+)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)', line)
 
             if m_user:
                 users.add(m_user.group(1))
@@ -90,6 +94,16 @@ def parse_file(_file):
                 u = m_dup.group(1)
                 users.add(u)
                 dup_groups.append((u, [intern(t) for t in m_dup.group(2).split()]))
+            elif m_loc:
+                u = m_loc.group(1)
+                lat = float(m_loc.group(2))
+                lng = float(m_loc.group(3))
+                if not (-90 <= lat <= 90):
+                    raise ValueError(f"latitude out of range [-90, 90]: {raw}")
+                if not (-180 <= lng <= 180):
+                    raise ValueError(f"longitude out of range [-180, 180]: {raw}")
+                users.add(u)
+                location[u] = (lat, lng)
             elif ':' in line:
                 u, _, body = line.partition(':')
                 u = u.strip()
@@ -313,8 +327,43 @@ if "users" in _args.kpi:
         traded.append(t)
 
 
+_dist_cache = {}
+
+
+def haversine_km(a, b):
+    """Great-circle distance in integer km between (lat, lng) points a and b."""
+    key = (a, b) if a <= b else (b, a)
+    if key in _dist_cache:
+        return _dist_cache[key]
+    (lat1, lon1), (lat2, lon2) = a, b
+    r1, r2 = math.radians(lat1), math.radians(lat2)
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    h = math.sin(dlat / 2) ** 2 + math.cos(r1) * math.cos(r2) * math.sin(dlon / 2) ** 2
+    km = round(2 * 6371 * math.asin(math.sqrt(h)))
+    _dist_cache[key] = km
+    return km
+
+
 def distance_terms():
-    return []
+    """(coeff, var) for every item move: ship take-item from owner to receiver.
+    Skips moves with an unknown owner or a missing location on either end."""
+    terms = []
+
+    def add(receiver, take_iid, var):
+        o = owner.get(take_iid)
+        if o is None or receiver not in location or o not in location:
+            return
+        d = haversine_km(location[o], location[receiver])
+        if d:
+            terms.append((d, var))
+
+    for u, legs in spend_swap.items():          # swap receive-legs (simple + combo)
+        for iid, v in legs:
+            add(u, iid, v)
+    for (u, iid), v in buy.items():             # cash buys
+        add(u, iid, v)
+    return terms
 
 
 def kpi_expr(kpi):
