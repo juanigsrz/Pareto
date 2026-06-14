@@ -1,5 +1,6 @@
 """In-process unit tests for pareto_core and serialize (no subprocess)."""
 import pareto_core as C
+import serialize as S
 
 
 SWAP = "alice: (1for1) A -> B\nbob: (1for1) B -> A\n"
@@ -68,6 +69,24 @@ def test_solve_money_buy():
                for p in res.payments), res.payments
 
 
+def test_to_dict_money():
+    d = S.to_dict(C.solve(MONEY, kpi=["trades"], want_stats=True))
+    assert d["status"] == "Optimal"
+    assert d["money_present"] is True
+    assert {"swaps", "combo_trades", "cash_purchases", "cash_summary",
+            "payments", "settlement", "stats"} <= set(d), d.keys()
+    assert "has_solution" not in d, d.keys()
+    assert any(p["item"] == "C1" for p in d["cash_purchases"]), d
+    assert d["stats"]["obj"] == 1, d["stats"]
+
+
+def test_to_dict_barter():
+    d = S.to_dict(C.solve(SWAP, kpi=["trades"]))
+    assert d["money_present"] is False
+    assert d["cash_purchases"] == [] and d["cash_summary"] == []
+    assert {(s["give"], s["receive"]) for s in d["swaps"]} == {("A", "B"), ("B", "A")}
+
+
 if __name__ == "__main__":
     test_parse_swap()
     test_parse_money()
@@ -75,4 +94,6 @@ if __name__ == "__main__":
     test_kpi_list_validation()
     test_solve_swap_trades()
     test_solve_money_buy()
+    test_to_dict_money()
+    test_to_dict_barter()
     print("OK: parse tests passed")

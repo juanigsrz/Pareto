@@ -1,4 +1,5 @@
 """Render a pareto_core.Result as CLI text or a structured JSON dict."""
+from dataclasses import asdict
 
 
 def to_text(res):
@@ -32,3 +33,10 @@ def to_text(res):
                 out.append(f"  {p['payer']} pays {p['payee']} ${p['amount']:g}")
 
     return "\n".join(out) + "\n"
+
+
+def to_dict(res):
+    """Structured JSON-ready dict for the HTTP service."""
+    d = asdict(res)
+    d.pop("has_solution", None)   # internal flag, not part of the API
+    return d
