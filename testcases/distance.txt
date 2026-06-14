@@ -1,0 +1,12 @@
+# Distance KPI demo. alice wants one copy of game G, available from bob (near)
+# or carol (far); dupcap caps her at one. With --kpi trades,distance the solver
+# maximizes trades (1) then ships from the nearer seller (bob).
+# Run: python main.py testcases/distance.txt --kpi trades,distance
+item C1 owner bob ask 10
+item C2 owner carol ask 10
+bid alice C1 20
+bid alice C2 20
+dupcap alice C1 C2
+location alice 0 0
+location bob 0 1
+location carol 0 5
