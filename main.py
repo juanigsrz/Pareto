@@ -104,9 +104,31 @@ def parse_file(_file):
 
 _argp = argparse.ArgumentParser()
 _argp.add_argument("file")
-_argp.add_argument("--kpi", choices=["trades", "users"], default="trades",
-                   help="objective: 'trades' = max total trades (default); "
-                        "'users' = max number of users with >= 1 trade")
+ALLOWED_KPIS = ("trades", "users", "distance")
+
+
+def parse_kpi_list(s):
+    """Comma-separated KPIs in priority order, e.g. 'trades,users'."""
+    kpis = []
+    for tok in s.split(","):
+        tok = tok.strip()
+        if not tok:
+            raise argparse.ArgumentTypeError("empty KPI in --kpi list")
+        if tok not in ALLOWED_KPIS:
+            raise argparse.ArgumentTypeError(
+                f"invalid KPI '{tok}' (choose from {', '.join(ALLOWED_KPIS)})")
+        if tok in kpis:
+            raise argparse.ArgumentTypeError(f"duplicate KPI '{tok}'")
+        kpis.append(tok)
+    return kpis
+
+
+_argp.add_argument("--kpi", type=parse_kpi_list, default=["trades"],
+                   help="comma-separated objectives in priority order "
+                        "(leftmost optimized first), e.g. 'trades,users'. "
+                        "Choices: 'trades' = max total trades (default); "
+                        "'users' = max users with >= 1 trade; "
+                        "'distance' = min total shipping distance (km).")
 _args = _argp.parse_args()
 parse_file(_args.file)
 
@@ -270,8 +292,9 @@ if os.environ.get("PARETO_MIPGAP"):
 # Per-user participation vars: a user participates if they receive any item (swap take or cash
 # buy) or give an owned item away (it leaves via swap or cash sale). Used for the 'users' KPI
 # and the users_traded report; skip the work when neither is requested.
+need_participation = ("users" in _args.kpi) or os.environ.get("PARETO_STATS")
 participation = {}
-if _args.kpi == "users" or os.environ.get("PARETO_STATS"):
+if need_participation:
     for u in users:
         part = [v for _, v in spend_swap.get(u, [])]      # receive via swap
         part += [v for _, v in buys_by_user.get(u, [])]   # receive via cash
@@ -281,17 +304,39 @@ if _args.kpi == "users" or os.environ.get("PARETO_STATS"):
         if part:
             participation[u] = part
 
-if _args.kpi == "users":
-    # Maximize number of users with >= 1 trade.
-    traded = []
+# 'users' KPI: one binary per user that can be 1 only if the user has >= 1 trade.
+traded = []
+if "users" in _args.kpi:
     for u, part in participation.items():
         t = model.addVar(vtype=GRB.BINARY)
         model.addConstr(t <= gp.quicksum(part))
         traded.append(t)
-    model.setObjective(gp.quicksum(traded), GRB.MAXIMIZE)
+
+
+def distance_terms():
+    return []
+
+
+def kpi_expr(kpi):
+    """Objective expression in MAXIMIZE form for one KPI."""
+    if kpi == "trades":
+        return gp.quicksum(swaps) + gp.quicksum(buys)
+    if kpi == "users":
+        return gp.quicksum(traded)
+    if kpi == "distance":
+        return -gp.quicksum(c * v for c, v in distance_terms())
+    raise ValueError(f"unknown KPI: {kpi}")
+
+
+# Lexicographic multi-objective: leftmost KPI = highest priority. All objectives
+# share ModelSense; min-objectives (distance) are negated into maximize form.
+model.ModelSense = GRB.MAXIMIZE
+if len(_args.kpi) == 1:
+    model.setObjective(kpi_expr(_args.kpi[0]), GRB.MAXIMIZE)
 else:
-    # Maximize total trades (swap item-moves + cash purchases).
-    model.setObjective(gp.quicksum(buys) + gp.quicksum(swaps), GRB.MAXIMIZE)
+    n = len(_args.kpi)
+    for k, kpi in enumerate(_args.kpi):
+        model.setObjectiveN(kpi_expr(kpi), index=k, priority=n - k)
 model.optimize()
 
 _STATUS = {GRB.OPTIMAL: "Optimal", GRB.TIME_LIMIT: "TimeLimit", GRB.INFEASIBLE: "Infeasible"}
