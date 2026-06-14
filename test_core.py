@@ -47,9 +47,32 @@ def test_kpi_list_validation():
             raise AssertionError(f"expected rejection of {bad!r}")
 
 
+def test_solve_swap_trades():
+    res = C.solve(SWAP, kpi=["trades"], want_stats=True)
+    assert res.status == "Optimal", res.status
+    pairs = {(s["give"], s["receive"]) for s in res.swaps}
+    assert ("A", "B") in pairs and ("B", "A") in pairs, res.swaps
+    assert res.stats["swap_vars"] == 2, res.stats
+    assert res.stats["obj"] == 2, res.stats
+    assert res.money_present is False
+
+
+def test_solve_money_buy():
+    res = C.solve(MONEY, kpi=["trades"], want_stats=True)
+    assert res.money_present is True
+    items = {p["item"] for p in res.cash_purchases}
+    assert "C1" in items, res.cash_purchases
+    summ = {r["user"]: r for r in res.cash_summary}
+    assert summ["alice"]["spent"] == 10 and summ["alice"]["net"] == 10
+    assert any(p["payer"] == "alice" and p["payee"] == "bob"
+               for p in res.payments), res.payments
+
+
 if __name__ == "__main__":
     test_parse_swap()
     test_parse_money()
     test_parse_bad_latitude()
     test_kpi_list_validation()
+    test_solve_swap_trades()
+    test_solve_money_buy()
     print("OK: parse tests passed")
