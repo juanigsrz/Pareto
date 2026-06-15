@@ -147,7 +147,7 @@ _args = _argp.parse_args()
 parse_file(_args.file)
 
 model = gp.Model()
-model.Params.OutputFlag = 0
+model.Params.OutputFlag = 1
 
 edge_vars = {}        # (i, j) -> binary var
 combo_records = []    # list of (in_pairs, out_pairs); pair = (item_id, var)
@@ -170,6 +170,14 @@ for user, send_ids, take_ids, N, M in wishes:
         e = model.addVar(vtype=GRB.BINARY)
         add_edge(take_ids[0], send_ids[0], e)
         spend_swap.setdefault(user, []).append((take_ids[0], e))
+        continue
+    
+    if len(send_ids) == 1 and M == 1:
+        s = send_ids[0]
+        for t in take_ids:
+            e = model.addVar(vtype=GRB.BINARY)
+            add_edge(t, s, e)
+            spend_swap.setdefault(user, []).append((t, e))
         continue
 
     combo_id = combo_node_id
@@ -302,6 +310,15 @@ if _time_limit:
     model.Params.TimeLimit = float(_time_limit)
 if os.environ.get("PARETO_MIPGAP"):
     model.Params.MIPGap = float(os.environ["PARETO_MIPGAP"])
+# Fast-solution knobs for instances too large to solve the root LP (huge events):
+# emphasize feasibility, run the NoRel heuristic before the root relaxation, and/or
+# pick the root LP method (1=dual simplex avoids the costly barrier ordering).
+if os.environ.get("PARETO_MIPFOCUS"):
+    model.Params.MIPFocus = int(os.environ["PARETO_MIPFOCUS"])
+if os.environ.get("PARETO_NORELHEUR"):
+    model.Params.NoRelHeurTime = float(os.environ["PARETO_NORELHEUR"])
+if os.environ.get("PARETO_METHOD"):
+    model.Params.Method = int(os.environ["PARETO_METHOD"])
 
 # Per-user participation vars: a user participates if they receive any item (swap take or cash
 # buy) or give an owned item away (it leaves via swap or cash sale). Used for the 'users' KPI
