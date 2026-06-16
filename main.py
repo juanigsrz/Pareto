@@ -2,7 +2,9 @@ import sys
 import os
 import re
 import math
+import time
 import argparse
+from collections import defaultdict
 import gurobipy as gp
 from gurobipy import GRB
 
@@ -164,15 +166,57 @@ def add_edge(i, j, var):
     in_terms.setdefault(j, []).append(var)
 
 
+# Hub-and-spoke compaction (disable with PARETO_NOHUB). A common wish pattern is a user
+# offering several of their items, each as a separate 1for1 wish, for the SAME set of
+# copies of a wanted game, then dup-protecting that set to receive a single copy:
+#     u: (1for1) A -> X1 X2 ...
+#     u: (1for1) B -> X1 X2 ...
+#     dupcap u X1 X2 ...
+# Built naively this is J gives x K copies of highly symmetric barter edges. Instead route
+# them through one virtual hub node: K in-spokes ("u receives a copy") and J out-spokes
+# ("u gives an item"), with sum(in) == sum(out) and the dupcap row capping receipts at 1.
+# Exact same optimum, J*K -> J+K variables, and far less degeneracy. In-spokes carry the
+# receipt (budget/distance via spend_swap) but are NOT counted as trades -- the copy's move
+# is already counted at its owner's give edge; only the J out-spokes (items given) count.
+hub_in_keys = set()    # (item, hub) edge keys of in-spokes: excluded from the trades objective
+hub_keys = set()       # (user, frozenset(take)) consumed by a hub -> skipped below
+if not os.environ.get("PARETO_NOHUB"):
+    _dup_sets = defaultdict(set)
+    for _u, _iids in dup_groups:
+        _dup_sets[_u].add(frozenset(_iids))
+    _gives = defaultdict(list)   # (user, frozenset(take)) -> [(give_item, take_ids), ...]
+    for _user, _send, _take, _N, _M in wishes:
+        if len(_send) == 1 and _M == 1 and _take:
+            _gives[(_user, frozenset(_take))].append((_send[0], _take))
+    for (_user, _tset), _glist in _gives.items():
+        _give_items = list(dict.fromkeys(g for g, _ in _glist))
+        if len(_give_items) < 2 or _tset not in _dup_sets.get(_user, ()):
+            continue  # only merge the dup-capped, multi-give pattern (the win case)
+        hub_keys.add((_user, _tset))
+        _hub = combo_node_id
+        combo_node_id += 1
+        _in_pairs, _out_pairs = [], []
+        for _t in _glist[0][1]:                     # any wish's take list; order is cosmetic
+            _v = model.addVar(vtype=GRB.BINARY)
+            add_edge(_t, _hub, _v)                  # copy _t flows into the hub (u receives it)
+            _in_pairs.append((_t, _v))
+            hub_in_keys.add((_t, _hub))
+            spend_swap.setdefault(_user, []).append((_t, _v))   # receipt -> budget/distance
+        for _g in _give_items:
+            _v = model.addVar(vtype=GRB.BINARY)
+            add_edge(_hub, _g, _v)                  # u gives item _g out of the hub
+            _out_pairs.append((_g, _v))
+        model.addConstr(gp.quicksum(v for _, v in _in_pairs)
+                        == gp.quicksum(v for _, v in _out_pairs))   # receive iff give
+        # cap (<= 1) is supplied by the existing dupcap row over _tset (also counts buys)
+        combo_records.append((_in_pairs, _out_pairs))
+
+
 # Build swap / combo variables (unchanged barter structure), recording per-user swap cash legs
 for user, send_ids, take_ids, N, M in wishes:
-    if len(send_ids) == len(take_ids) == 1:
-        e = model.addVar(vtype=GRB.BINARY)
-        add_edge(take_ids[0], send_ids[0], e)
-        spend_swap.setdefault(user, []).append((take_ids[0], e))
-        continue
-    
     if len(send_ids) == 1 and M == 1:
+        if (user, frozenset(take_ids)) in hub_keys:
+            continue  # merged into a hub above
         s = send_ids[0]
         for t in take_ids:
             e = model.addVar(vtype=GRB.BINARY)
@@ -302,7 +346,7 @@ for u in users:
 
 # Objective. Integer coefficients are essential: a fractional tie-break (e.g. weighting swaps by
 # 1+eps) blocks Gurobi's integer-bound rounding and makes proving optimality 10-60x slower.
-swaps = list(edge_vars.values())
+swaps = [v for k, v in edge_vars.items() if k not in hub_in_keys]  # hub in-spokes aren't trades
 buys = list(buy.values())
 
 _time_limit = os.environ.get("PARETO_TIME_LIMIT")
@@ -403,7 +447,55 @@ else:
     n = len(_args.kpi)
     for k, kpi in enumerate(_args.kpi):
         model.setObjectiveN(kpi_expr(kpi), index=k, priority=n - k)
+# Optional heuristic fast mode (PARETO_FAST): trade a proven optimum for a large
+# speedup on big, degenerate instances. The barter/budget LP relaxation is highly
+# degenerate -- its objective bound is reached almost instantly, but Gurobi then burns
+# most of the runtime in heuristics digging out an integer point among thousands of
+# tied fractional variables. PARETO_FAST short-circuits that: solve the continuous
+# relaxation once (dual simplex gives a vertex with reduced costs and no costly
+# barrier crossover), fix every variable the relaxation leaves at 0, and solve the
+# much smaller residual MIP. Fixing only zeros can never make the residual infeasible
+# (the relaxation's own point stays feasible) and at worst drops a few tied trades.
+# The relaxation objective is a valid bound, so the achieved gap is reported.
+fast_bound = None
+if os.environ.get("PARETO_FAST"):
+    if len(_args.kpi) > 1:
+        sys.exit("PARETO_FAST does not support multi-objective --kpi lists")
+    
+    print(f"\n--- PARETO_FAST: Aggressive LP Pruning ---", file=sys.stderr)
+    _t0 = time.perf_counter()
+    model.update()
+    relaxed = model.relax()
+    relaxed.Params.OutputFlag = 0
+    relaxed.Params.Method = int(os.environ.get("PARETO_METHOD", 1))  # dual simplex
+    relaxed.optimize()
+    fast_bound = relaxed.ObjVal
+    # Prune aggressively: Delete any variable (swaps AND buys) with low fractional probability
+    # Increase this PARETO_FAST threshold (e.g., 0.05 or 0.1) for a smaller, faster model
+    fixed_swaps = 0
+    fixed_buys = 0
+
+    # FIX: Store variable IDs in a set to avoid Gurobi's overloaded '==' operator
+    buy_var_ids = {id(var) for var in buy.values()}
+    
+    # Zip original variables with relaxed variables to map the X values back
+    for v, rv in zip(model.getVars(), relaxed.getVars()):
+        if rv.X < float(os.environ.get("PARETO_FAST")):
+            v.UB = 0.0
+            # Just for reporting: distinguish buys from swaps by checking their names or sets
+            if id(v) in buy_var_ids:
+                fixed_buys += 1
+            else:
+                fixed_swaps += 1
+    print(f"  LP bound = {fast_bound:.0f} (Solved in {time.perf_counter() - _t0:.2f}s)", file=sys.stderr)
+    print(f"  Sheared matrix: locked {fixed_buys} cash buys and {fixed_swaps} swap edges.", file=sys.stderr)
+    print(f"--- Solving Residual MIP ---\n", file=sys.stderr)
+
 model.optimize()
+if fast_bound is not None and model.SolCount > 0:
+    _gap = abs(fast_bound - model.ObjVal) / max(abs(fast_bound), 1.0)
+    print(f"PARETO_FAST: obj={model.ObjVal:.0f} bound={fast_bound:.0f} gap={_gap:.4%}",
+          file=sys.stderr)
 
 _STATUS = {GRB.OPTIMAL: "Optimal", GRB.TIME_LIMIT: "TimeLimit", GRB.INFEASIBLE: "Infeasible"}
 status = _STATUS.get(model.Status, f"Status{model.Status}")

@@ -41,3 +41,6 @@ venv/
 input.txt
 output.txt
 inst.txt
+
+# Gurobi
+gurobi.env
