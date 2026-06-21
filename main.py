@@ -16,7 +16,7 @@ budget = {}   # user -> X_u  (absent => +inf, unconstrained)
 owner = {}    # item_id -> user (the original owner)
 ask = {}      # item_id -> Z_i (absent => 0)
 bids = {}     # (user, item_id) -> Y_ui (max cash the user will pay)
-dup_groups = []  # list of (user, [item_id, ...]); user receives <=1 of these copies
+take_groups = []  # list of (user, N, [item_id, ...]); user receives <= N of these copies
 location = {}  # user -> (lat, lng) in degrees
 
 
@@ -73,6 +73,7 @@ def parse_file(_file):
             m_user = re.fullmatch(r'user\s+(\S+)\s+budget\s+(\d+)', line)
             m_item = re.fullmatch(r'item\s+(\S+)\s+owner\s+(\S+)(?:\s+ask\s+(\d+))?', line)
             m_bid = re.fullmatch(r'bid\s+(\S+)\s+(\S+)\s+(\d+)', line)
+            m_take = re.fullmatch(r'takecap\s+(\S+)\s+(\d+)\s+(.+)', line)
             m_dup = re.fullmatch(r'dupcap\s+(\S+)\s+(.+)', line)
             m_loc = re.fullmatch(
                 r'location\s+(\S+)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)', line)
@@ -92,10 +93,15 @@ def parse_file(_file):
                 users.add(u)
                 iid = intern(m_bid.group(2))
                 bids[(u, iid)] = int(m_bid.group(3))
+            elif m_take:
+                u = m_take.group(1)
+                users.add(u)
+                take_groups.append((u, int(m_take.group(2)),
+                                    [intern(t) for t in m_take.group(3).split()]))
             elif m_dup:
                 u = m_dup.group(1)
                 users.add(u)
-                dup_groups.append((u, [intern(t) for t in m_dup.group(2).split()]))
+                take_groups.append((u, 1, [intern(t) for t in m_dup.group(2).split()]))
             elif m_loc:
                 u = m_loc.group(1)
                 lat = float(m_loc.group(2))
@@ -182,7 +188,7 @@ hub_in_keys = set()    # (item, hub) edge keys of in-spokes: excluded from the t
 hub_keys = set()       # (user, frozenset(take)) consumed by a hub -> skipped below
 if not os.environ.get("PARETO_NOHUB"):
     _dup_sets = defaultdict(set)
-    for _u, _iids in dup_groups:
+    for _u, _n, _iids in take_groups:
         _dup_sets[_u].add(frozenset(_iids))
     _gives = defaultdict(list)   # (user, frozenset(take)) -> [(give_item, take_ids), ...]
     for _user, _send, _take, _N, _M in wishes:
@@ -296,12 +302,12 @@ real_item_ids = set(item_to_id.values())
 # per-item seller slot (out_sum + buys <= 1) built in the loop below.
 # Note: this excludes any combo whose take-set needs M>=2 of these protected
 # copies (it can never activate) -- the correct resolution of contradictory input.
-for u, iids in dup_groups:
+for u, n, iids in take_groups:
     grp = set(iids)
     terms = [v for (it, v) in spend_swap.get(u, []) if it in grp]
     terms += [buy[(u, it)] for it in grp if (u, it) in buy]
-    if len(terms) > 1:
-        model.addConstr(gp.quicksum(terms) <= 1)
+    if len(terms) > n:
+        model.addConstr(gp.quicksum(terms) <= n)
 
 # Build model constraints (swap balance kept; cash competes for the same single slot)
 for node in real_item_ids:
