@@ -20,8 +20,9 @@ solves it to proven optimality with [Gurobi](https://www.gurobi.com/).
 - **Net budgets** — a user's spend minus earnings from items sold stays under a
   cap, enabling cash *pass-through chains* (sell one game to fund buying
   another).
-- **Duplicate protection (`dupcap`)** — a user receives at most one copy of a
-  given game, counting swap receipts and cash buys together.
+- **Take / give caps (`takecap` / `givecap`)** — bound how many of a listed set
+  of copies a user may **receive** (`takecap`) or **give** (`givecap`),
+  counting swaps and cash together. `dupcap` is the legacy `takecap … 1` alias.
 - **Lexicographic objectives** — `--kpi` takes a priority-ordered list (e.g.
   `trades,users`); each objective is optimized in turn. Available KPIs: total
   trades, participating users, and total shipping `distance` (minimized).
@@ -91,14 +92,21 @@ location <user> <lat> <lng>              # user location for the distance KPI
 A bid creates a cash edge only when it clears the ask (`max_price >= ask`) and
 the bidder is not the owner.
 
-### Duplicate cap
+### Take / give caps
 
 ```
-dupcap <user> <item...>     # user receives at most ONE of these copies
+takecap <user> <N> <item...>   # user RECEIVES at most N of these copies
+givecap <user> <N> <item...>   # user GIVES   at most N of these copies
+dupcap  <user> <item...>       # legacy alias for: takecap <user> 1 <item...>
 ```
 
-Use it when several listed items are copies of the *same* game and the user
-wants only one, regardless of whether it arrives by swap or by cash.
+Both count swaps and cash together. `takecap` is receiver-side duplicate
+protection: list copies of the same game so the user ends up with at most N
+regardless of whether they arrive by swap or cash. `givecap` is the give-side
+mirror over the user's **own** copies — list a physical item alongside every
+combo/bundle item that contains it so it can leave at most N times in total
+(e.g. `givecap u 1 A AB` lets `A` go out standalone *or* inside combo `AB`, not
+both). Every `givecap` item must be owned by the named user.
 
 ### Locations (distance KPI)
 
@@ -159,8 +167,10 @@ Pareto builds one MIP:
 - Per user: `spend (swap receipts + buys, at ask) − earnings (own items sold) ≤
   budget`. Because earnings count, a user can fund a purchase by selling
   something in the same plan (cash chains).
-- `dupcap` adds one constraint summing a user's swap-receive and buy indicators
-  over the protected copies to ≤ 1.
+- `takecap` / `givecap` each add one constraint per group: `takecap` sums a
+  user's swap-receive and buy indicators over the listed copies to ≤ N;
+  `givecap` sums the swap-supply and cash-sale indicators of the user's own
+  copies to ≤ N.
 - KPIs combine lexicographically (Gurobi hierarchical multi-objective): `trades`
   maximizes total moves, `users` maximizes distinct participants, `distance`
   minimizes total owner→receiver shipping km. List order sets priority.
@@ -182,10 +192,11 @@ python main.py testcases/money/cashchain.txt
 
 ## Testing
 
-`dupcap` has a self-contained subprocess test (no test framework needed):
+The caps have self-contained subprocess tests (no test framework needed):
 
 ```bash
 python test_dupcap.py
+python test_takecap.py
 ```
 
 
