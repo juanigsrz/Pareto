@@ -17,6 +17,7 @@ owner = {}    # item_id -> user (the original owner)
 ask = {}      # item_id -> Z_i (absent => 0)
 bids = {}     # (user, item_id) -> Y_ui (max cash the user will pay)
 take_groups = []  # list of (user, N, [item_id, ...]); user receives <= N of these copies
+give_groups = []  # list of (user, N, [item_id, ...]); user gives <= N of these copies
 location = {}  # user -> (lat, lng) in degrees
 
 
@@ -74,6 +75,7 @@ def parse_file(_file):
             m_item = re.fullmatch(r'item\s+(\S+)\s+owner\s+(\S+)(?:\s+ask\s+(\d+))?', line)
             m_bid = re.fullmatch(r'bid\s+(\S+)\s+(\S+)\s+(\d+)', line)
             m_take = re.fullmatch(r'takecap\s+(\S+)\s+(\d+)\s+(.+)', line)
+            m_give = re.fullmatch(r'givecap\s+(\S+)\s+(\d+)\s+(.+)', line)
             m_dup = re.fullmatch(r'dupcap\s+(\S+)\s+(.+)', line)
             m_loc = re.fullmatch(
                 r'location\s+(\S+)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)', line)
@@ -98,6 +100,11 @@ def parse_file(_file):
                 users.add(u)
                 take_groups.append((u, int(m_take.group(2)),
                                     [intern(t) for t in m_take.group(3).split()]))
+            elif m_give:
+                u = m_give.group(1)
+                users.add(u)
+                give_groups.append((u, int(m_give.group(2)),
+                                    [intern(t) for t in m_give.group(3).split()]))
             elif m_dup:
                 u = m_dup.group(1)
                 users.add(u)
@@ -306,6 +313,23 @@ for u, n, iids in take_groups:
     grp = set(iids)
     terms = [v for (it, v) in spend_swap.get(u, []) if it in grp]
     terms += [buy[(u, it)] for it in grp if (u, it) in buy]
+    if len(terms) > n:
+        model.addConstr(gp.quicksum(terms) <= n)
+
+# Give cap: a user gives at most N of the listed copies, counting swap supply
+# (in_terms, incl. combo/hub out-spokes) and cash sale (buy_terms). Mirror of
+# takecap. Items must be owned by the user.
+for u, n, iids in give_groups:
+    grp = set(iids)
+    for it in grp:
+        if owner.get(it) != u:
+            raise ValueError(
+                f"givecap user '{u}' lists item '{id_to_item[it]}' "
+                f"owned by '{owner.get(it)}'")
+    terms = []
+    for it in grp:
+        terms += in_terms.get(it, [])
+        terms += buy_terms.get(it, [])
     if len(terms) > n:
         model.addConstr(gp.quicksum(terms) <= n)
 
