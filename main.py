@@ -10,7 +10,7 @@ from gurobipy import GRB
 
 item_to_id = {}
 id_to_item = {}
-wishes = []   # (user, give, take, N, M): 'give' games given, 'take' games taken, give at most 'N', take at least 'M'
+wishes = []   # (user, give, take, N, M): 'give' games given, 'take' games taken, give any 'N', take any 'M'
 users = set()
 budget = {}   # user -> X_u  (absent => +inf, unconstrained)
 owner = {}    # item_id -> user (the original owner)

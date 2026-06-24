@@ -13,7 +13,7 @@ solves it to proven optimality with [Gurobi](https://www.gurobi.com/).
 ## Features
 
 - **Swaps** — ordinary `give -> take` trade cycles across users.
-- **N-to-M bundles** — give *at most* N items to receive *at least* M (e.g.
+- **N-to-M bundles** — give *any * N items to receive *any* M (e.g.
   `2for1`, `1for2`).
 - **Cash** — items can carry an *ask* price; users place *bids*; a global
   clearinghouse nets everyone out. Cash and barter compete for the same item.
@@ -69,7 +69,7 @@ One directive per line. `#` starts a comment; blank lines are ignored.
 <user> : (<options>) <give items...> -> <take items...>
 ```
 
-`<options>` is an `NforM` token meaning **give at most N, receive at least M**.
+`<options>` is an `NforM` token meaning **give any N, receive any M**.
 The simplest case is a one-for-one swap:
 
 ```
