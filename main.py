@@ -256,17 +256,8 @@ for user, send_ids, take_ids, N, M in wishes:
 
     # These ensure that no individual edge is active unless the whole combo is active
     active = model.addVar(vtype=GRB.BINARY)
-    for v in out_vars:
-        model.addConstr(v <= active)
-    for v in in_vars:
-        model.addConstr(v <= active)
-
-    # Total outgoing (sent) <= N if combo is active, make sure at least 1 item is sent
-    model.addConstr(gp.quicksum(out_vars) <= N * active)
-    model.addConstr(active <= gp.quicksum(out_vars))
-
-    # Total incoming (received) >= M if combo is active
-    model.addConstr(M * active <= gp.quicksum(in_vars))
+    model.addConstr(gp.quicksum(out_vars) == N * active)
+    model.addConstr(gp.quicksum(in_vars) == M * active)
 
     combo_records.append((in_pairs, out_pairs))
 
