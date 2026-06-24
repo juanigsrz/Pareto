@@ -347,17 +347,20 @@ items_by_owner = {}  # user -> list of item_id
 for iid, o in owner.items():
     items_by_owner.setdefault(o, []).append(iid)
 
-# Per-user net budget: spend (swap receipts + cash buys) minus earnings (own items leaving) <= X_u
+# Per-user net CASH budget: cash spend (buys) minus cash earnings (own items sold for
+# cash) <= X_u. Barter swaps move no money -- an item leaving via a swap edge is a trade,
+# not a sale -- so swap legs never touch the budget even when the item carries an ask (the
+# ask is only the *cash* sale price). A user can fund a buy by SELLING a game for cash, but
+# not by bartering one away: counting barter-at-ask as earnings would credit phantom cash
+# and let a user blow past their real cash cap.
 spend_data = {}  # user -> list of (coeff, var) for reporting
 earn_data = {}   # user -> list of (coeff, var) for reporting
 for u in users:
-    spend = [(ask.get(iid, 0), v) for (iid, v) in spend_swap.get(u, []) if ask.get(iid, 0)]
-    spend += [(ask.get(iid, 0), v) for (iid, v) in buys_by_user.get(u, []) if ask.get(iid, 0)]
+    spend = [(ask.get(iid, 0), v) for (iid, v) in buys_by_user.get(u, []) if ask.get(iid, 0)]
     earn = []
     for iid in items_by_owner.get(u, []):
         z = ask.get(iid, 0)
         if z:
-            earn += [(z, v) for v in in_terms.get(iid, [])]
             earn += [(z, v) for v in buy_terms.get(iid, [])]
     spend_data[u] = spend
     earn_data[u] = earn
@@ -578,8 +581,9 @@ if show_money:
             o = owner[iid]
             print(f"{id_to_item[iid]}: {o} -> {u}  ({u} pays {o} ${ask.get(iid, 0)})")
 
-    # Per-user net: every active cash leg (swap take or buy) means the receiver owes
-    # ask[item] to the item's owner. spent - earned > 0 => owes, < 0 => receives.
+    # Per-user net: every active cash buy means the buyer owes ask[item] to the item's
+    # owner. Barter swaps are free, so they never appear here. spent - earned > 0 => owes,
+    # < 0 => receives.
     net = {}
     print("\nCash Summary:")
     for u in sorted(users):
@@ -592,18 +596,15 @@ if show_money:
               f"net ${net[u]:g} ({direction}) (cap ${cap})")
     assert sum(net.values()) == 0, "cash nets must balance to zero"
 
-    # Itemized payments: reconstruct who owes whom from the active cash legs, then net
+    # Itemized payments: reconstruct who owes whom from the active cash buys, then net
     # pairwise so A<->B collapses to a single directed line. Traceable to the items.
+    # Only cash buys move money; barter swaps are free, so they create no payment.
     flows = {}  # (payer, payee) -> amount
 
     def add_flow(payer, payee, amt):
         if amt and payer != payee:
             flows[(payer, payee)] = flows.get((payer, payee), 0) + amt
 
-    for u, legs in spend_swap.items():
-        for iid, v in legs:
-            if active(v):
-                add_flow(u, owner[iid], ask.get(iid, 0))
     for (u, iid), v in buy.items():
         if active(v):
             add_flow(u, owner[iid], ask.get(iid, 0))

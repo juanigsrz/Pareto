@@ -164,9 +164,11 @@ Pareto builds one MIP:
   whole `NforM` group activates together.
 - Per item: at most one slot — it can leave via swap *or* be sold for cash, not
   both. Swap in-flow equals out-flow (you only give an item if you receive one).
-- Per user: `spend (swap receipts + buys, at ask) − earnings (own items sold) ≤
-  budget`. Because earnings count, a user can fund a purchase by selling
-  something in the same plan (cash chains).
+- Per user: `cash spend (buys, at ask) − cash earnings (own items sold for cash)
+  ≤ budget`. Only cash moves money — a barter swap is free even when the item
+  carries an ask (the ask is just the *cash* price), so swap legs never touch the
+  budget. Because cash earnings count, a user can fund a purchase by *selling* a
+  game for cash in the same plan (cash chains) — but not by bartering one away.
 - `takecap` / `givecap` each add one constraint per group: `takecap` sums a
   user's swap-receive and buy indicators over the listed copies to ≤ N;
   `givecap` sums the swap-supply and cash-sale indicators of the user's own
@@ -205,8 +207,8 @@ python main.py in.txt | python check.py in.txt -      # OUTPUT '-' reads stdin
 
 Exit `0` prints an `OK` line; exit `1` prints one `VIOLATION: …` per problem.
 Budgets are checked as pure barter — only cash moves money, so a swap-received
-item with an ask is free to the receiver (this intentionally differs from the
-solver's net-budget, which also charges swapped asks).
+item with an ask is free to the receiver. The solver enforces the same rule, so
+checker and solver agree.
 
 
 ## Testing
