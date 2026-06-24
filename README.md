@@ -190,6 +190,25 @@ python main.py testcases/money/cashchain.txt
 ```
 
 
+## Checking a solution
+
+`check.py` independently verifies that a solver output is a **legal** solution —
+without trusting the solver. It re-derives every constraint from the instance:
+each swap is backed by a real wish, no item moves twice (swap or cash), every
+given item has something received in exchange, cash sales clear the ask, and
+`takecap` / `givecap` / budgets hold. It checks legality only (not optimality).
+
+```bash
+python check.py INPUT.txt OUTPUT.txt
+python main.py in.txt | python check.py in.txt -      # OUTPUT '-' reads stdin
+```
+
+Exit `0` prints an `OK` line; exit `1` prints one `VIOLATION: …` per problem.
+Budgets are checked as pure barter — only cash moves money, so a swap-received
+item with an ask is free to the receiver (this intentionally differs from the
+solver's net-budget, which also charges swapped asks).
+
+
 ## Testing
 
 The caps have self-contained subprocess tests (no test framework needed):
