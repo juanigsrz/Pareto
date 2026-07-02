@@ -79,9 +79,16 @@ def test_lexicographic_order_changes_outcome():
     # trades first -> the buy happens.
     trades_first = run(ONE_OPTIONAL, kpi="trades,distance").stdout
     assert "pays" in trades_first, trades_first
-    # distance first -> optimum is 0 km (no move); trades is held subordinate.
-    distance_first = run(ONE_OPTIONAL, kpi="distance,trades").stdout
-    assert "pays" not in distance_first, distance_first
+    # distance first is degenerate (0 trades = 0 km) and is now rejected up front.
+    p = run(ONE_OPTIONAL, kpi="distance,trades", check=False)
+    assert p.returncode != 0
+    assert "distance" in (p.stderr + p.stdout)
+
+
+def test_distance_only_rejected():
+    p = run(ONE_OPTIONAL, kpi="distance", check=False)
+    assert p.returncode != 0
+    assert "distance" in (p.stderr + p.stdout)
 
 
 def test_bad_latitude_rejected():
@@ -117,6 +124,7 @@ if __name__ == "__main__":
     test_duplicate_kpi_rejected()
     test_distance_picks_closer_seller()
     test_lexicographic_order_changes_outcome()
+    test_distance_only_rejected()
     test_bad_latitude_rejected()
     test_stats_multi_objective()
     print("OK: kpi list tests passed")

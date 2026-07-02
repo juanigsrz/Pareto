@@ -21,6 +21,10 @@ give_groups = []  # list of (user, N, [item_id, ...]); user gives <= N of these 
 location = {}  # user -> (lat, lng) in degrees
 
 
+def warn(msg):
+    print(f"WARNING: {msg}", file=sys.stderr)
+
+
 def intern(token):
     if token not in item_to_id:
         item_to_id[token] = len(item_to_id)
@@ -51,6 +55,8 @@ def parse_wish_body(body, line):
         raise ValueError(f"Non supported amount of groups (max 2): {line}")
 
     N, M = len(groups[0]), len(groups[1])
+    if len(options) > 1:
+        warn(f"multiple options in parens; only the last ('{options[-1]}') is used: {line.strip()}")
     for opt in options:
         match = re.fullmatch(r'(\d+)for(\d+)', opt)
         if not match:
@@ -60,6 +66,9 @@ def parse_wish_body(body, line):
 
     give = [intern(t) for t in groups[0]]
     take = [intern(t) for t in groups[1]]
+    if N > len(give) or M > len(take):
+        warn(f"combo can never activate: asks to give {N} of {len(give)} listed and "
+             f"take {M} of {len(take)} listed: {line.strip()}")
     return give, take, N, M
 
 
@@ -130,6 +139,18 @@ def parse_file(_file):
             else:
                 raise ValueError(f"Unrecognized line: {raw}")
 
+    # A cap that names an item nobody owns is almost always a typo: the phantom item
+    # matches no real copy, so it silently protects nothing (weakening dup/give limits).
+    cap_iids = set()
+    for _u, _n, _iids in take_groups:
+        cap_iids.update(_iids)
+    for _u, _n, _iids in give_groups:
+        cap_iids.update(_iids)
+    for _iid in sorted(cap_iids, key=lambda i: id_to_item[i]):
+        if _iid not in owner:
+            warn(f"cap references item '{id_to_item[_iid]}' with no declared owner "
+                 f"(typo? it protects nothing)")
+
 
 _argp = argparse.ArgumentParser()
 _argp.add_argument("file")
@@ -149,6 +170,13 @@ def parse_kpi_list(s):
         if tok in kpis:
             raise argparse.ArgumentTypeError(f"duplicate KPI '{tok}'")
         kpis.append(tok)
+    # 'distance' as the first (or only) objective is degenerate: zero trades ships zero
+    # km, so the unconstrained optimum is to trade nothing. It only makes sense as a
+    # tie-breaker after a volume objective, so require it to follow 'trades' or 'users'.
+    if kpis and kpis[0] == "distance":
+        raise argparse.ArgumentTypeError(
+            "'distance' cannot be the first/only objective (degenerate: zero trades "
+            "gives zero distance); put it after 'trades' or 'users'")
     return kpis
 
 
@@ -163,6 +191,7 @@ parse_file(_args.file)
 
 model = gp.Model()
 model.Params.OutputFlag = 1
+model.Params.Symmetry = 2
 
 edge_vars = {}        # (i, j) -> binary var
 combo_records = []    # list of (in_pairs, out_pairs); pair = (item_id, var)
@@ -191,7 +220,8 @@ def add_edge(i, j, var):
 # Exact same optimum, J*K -> J+K variables, and far less degeneracy. In-spokes carry the
 # receipt (budget/distance via spend_swap) but are NOT counted as trades -- the copy's move
 # is already counted at its owner's give edge; only the J out-spokes (items given) count.
-hub_in_keys = set()    # (item, hub) edge keys of in-spokes: excluded from the trades objective
+# (In-spokes land on the virtual hub node, so the "in-side is a real item" trades filter
+# below excludes them automatically -- no explicit key set needed.)
 hub_keys = set()       # (user, frozenset(take)) consumed by a hub -> skipped below
 if not os.environ.get("PARETO_NOHUB"):
     _dup_sets = defaultdict(set)
@@ -199,7 +229,7 @@ if not os.environ.get("PARETO_NOHUB"):
         _dup_sets[_u].add(frozenset(_iids))
     _gives = defaultdict(list)   # (user, frozenset(take)) -> [(give_item, take_ids), ...]
     for _user, _send, _take, _N, _M in wishes:
-        if len(_send) == 1 and _M == 1 and _take:
+        if len(_send) == 1 and _N == 1 and _M == 1 and _take:  # true 1-for-1 only (N==1)
             _gives[(_user, frozenset(_take))].append((_send[0], _take))
     for (_user, _tset), _glist in _gives.items():
         _give_items = list(dict.fromkeys(g for g, _ in _glist))
@@ -213,7 +243,6 @@ if not os.environ.get("PARETO_NOHUB"):
             _v = model.addVar(vtype=GRB.BINARY)
             add_edge(_t, _hub, _v)                  # copy _t flows into the hub (u receives it)
             _in_pairs.append((_t, _v))
-            hub_in_keys.add((_t, _hub))
             spend_swap.setdefault(_user, []).append((_t, _v))   # receipt -> budget/distance
         for _g in _give_items:
             _v = model.addVar(vtype=GRB.BINARY)
@@ -227,11 +256,15 @@ if not os.environ.get("PARETO_NOHUB"):
 
 # Build swap / combo variables (unchanged barter structure), recording per-user swap cash legs
 for user, send_ids, take_ids, N, M in wishes:
-    if len(send_ids) == 1 and M == 1:
+    if len(send_ids) == 1 and N == 1 and M == 1:  # true 1-for-1 (N==1 too, else dead combo)
         if (user, frozenset(take_ids)) in hub_keys:
             continue  # merged into a hub above
         s = send_ids[0]
         for t in take_ids:
+            if (t, s) in edge_vars:
+                continue  # duplicate wish: reuse the existing edge var. Both would share the
+                          # same single <=1 slot; a shadow var only risks an unreported trade
+                          # (add_edge overwrites edge_vars but leaves both in in/out_terms).
             e = model.addVar(vtype=GRB.BINARY)
             add_edge(t, s, e)
             spend_swap.setdefault(user, []).append((t, e))
@@ -263,6 +296,7 @@ for user, send_ids, take_ids, N, M in wishes:
 
 # Cash purchase variables: created only for bids that clear the ask and aren't self-buys
 buy = {}
+explicit_bid_pairs = set(bids)   # every (user, item) that had an explicit bid, cleared or not
 for (u, iid), y in bids.items():
     o = owner.get(iid)
     if o is None:
@@ -278,15 +312,25 @@ for (u, iid), y in bids.items():
 # A wish's take-item may also be acquired with cash (implicit bid, willing to pay the ask),
 # funded by the net budget. Lets a swap intent complete via a cash chain when no barter swap
 # closes -- e.g. B sells B_GAME for cash and uses the proceeds to buy its wished C_GAME.
-# Gated on money being present so pure-barter instances keep strict swap reciprocity.
+# Two guards keep the implicit bid a conservative default rather than an imposition:
+#   * only for users who opted into cash (declared a budget or placed any explicit bid) --
+#     a pure-barter participant is never made to owe money they never signed up for;
+#   * never for a (user, item) that had an explicit bid -- the explicit bid governs, even a
+#     low one that was filtered out (a 5-bid on a 10-ask is a refusal to pay 10, not licence
+#     to charge the full ask implicitly).
 money_present = bool(ask) or bool(budget) or bool(bids)
+cash_users = set(budget) | {u for (u, _iid) in bids}   # opted into spending cash
 if money_present:
     for user, send_ids, take_ids, N, M in wishes:
+        if user not in cash_users:
+            continue          # never opted into cash -> no unbidden implicit purchase
         for t in take_ids:
             if t not in ask:
                 continue          # can't implicitly buy an unlisted item
-            if user == owner.get(t) or (user, t) in buy:
+            if user == owner.get(t):
                 continue
+            if (user, t) in buy or (user, t) in explicit_bid_pairs:
+                continue          # already have a buy var, or an explicit bid governs
             buy[(user, t)] = model.addVar(vtype=GRB.BINARY)
 
 buy_terms = {}  # item_id -> list of buy vars
@@ -370,8 +414,21 @@ for u in users:
 
 # Objective. Integer coefficients are essential: a fractional tie-break (e.g. weighting swaps by
 # 1+eps) blocks Gurobi's integer-bound rounding and makes proving optimality 10-60x slower.
-swaps = [v for k, v in edge_vars.items() if k not in hub_in_keys]  # hub in-spokes aren't trades
+# Count only edges whose in-side (j) is a real item: those are gives -- items that physically
+# move. Combo/hub receive-legs land on a virtual node and are excluded, so each moved item is
+# counted exactly once (at the giver's edge), matching the cash buys' 1-per-move.
+swaps = [v for (_i, j), v in edge_vars.items() if j in real_item_ids]
 buys = list(buy.values())
+
+# MIPGapAbs = ~1 lets Gurobi stop 1 trade short of the optimum. On a huge degenerate
+# instance that is a big speedup and 1 trade is negligible against thousands; on a small
+# instance it returns a visibly-suboptimal answer, and in a lexicographic --kpi solve it
+# can zero out the primary objective (dropping trades to 0 lets 'distance' pick 0 km / no
+# trades). So gate it: single-objective only, and only past a var-count threshold.
+# PARETO_GAPABS_MINVARS overrides the threshold; 0 disables the gap entirely.
+_gapabs_min = int(os.environ.get("PARETO_GAPABS_MINVARS", 20000))
+if _gapabs_min and len(_args.kpi) == 1 and len(swaps) + len(buys) >= _gapabs_min:
+    model.Params.MIPGapAbs = 1 - 1e-6
 
 _time_limit = os.environ.get("PARETO_TIME_LIMIT")
 if _time_limit:
