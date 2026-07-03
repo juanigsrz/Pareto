@@ -12,17 +12,18 @@ solves it to proven optimality with [Gurobi](https://www.gurobi.com/).
 
 ## Features
 
-- **Swaps** — ordinary `give -> take` trade cycles across users.
-- **N-to-M bundles** — give *at most* N items to receive *at least* M (e.g.
+- **Swaps**: ordinary `give -> take` trade cycles across users.
+- **N-for-M trades**: give *any* N items to receive *any* M (e.g.
   `2for1`, `1for2`).
-- **Cash** — items can carry an *ask* price; users place *bids*; a global
+- **Cash**: items can carry an *ask* price; users place *bids*; a global
   clearinghouse nets everyone out. Cash and barter compete for the same item.
-- **Net budgets** — a user's spend minus earnings from items sold stays under a
+- **Net budgets**: a user's spend minus earnings from items sold stays under a
   cap, enabling cash *pass-through chains* (sell one game to fund buying
   another).
-- **Duplicate protection (`dupcap`)** — a user receives at most one copy of a
-  given game, counting swap receipts and cash buys together.
-- **Lexicographic objectives** — `--kpi` takes a priority-ordered list (e.g.
+- **Take / give caps (`takecap` / `givecap`)**: bound how many of a listed set
+  of copies a user may **receive** (`takecap`) or **give** (`givecap`),
+  counting swaps and cash together. `dupcap` is the legacy `takecap … 1` alias.
+- **Lexicographic objectives**: `--kpi` takes a priority-ordered list (e.g.
   `trades,users`); each objective is optimized in turn. Available KPIs: total
   trades, participating users, and total shipping `distance` (minimized).
 
@@ -53,9 +54,13 @@ Options and environment variables:
 | Flag / Env | Effect |
 |---|---|
 | `--kpi <list>` | Comma-separated objectives in priority order (leftmost first), e.g. `--kpi trades,users`. Choices: `trades` = max total trades (default); `users` = max users with ≥ 1 trade; `distance` = min total shipping distance (km). |
+| `--format <text\|json>` | Output format. `text` (default) prints the sections below plus a `#` verification header; `json` prints one structured document. |
+| `--in-format <auto\|text\|json>` | Input format. `auto` (default) detects JSON by a leading `{`. Read `-` for stdin. |
 | `PARETO_TIME_LIMIT` | Solver time limit, seconds. |
 | `PARETO_MIPGAP` | Accept a solution within this relative MIP gap. |
 | `PARETO_STATS` | Print a `STATS …` line (vars, objective, gap, runtime) to stderr. |
+| `PARETO_FAST` | Aggressive pruning just to get a valid solution. Set it to the min accepted float in the LP relaxation. |
+| `PARETO_NOHUB` | Turn off HUB Optimization (groups up `A -> List`, `B -> List`, `dupcap List`) |
 
 
 ## Input format
@@ -68,7 +73,7 @@ One directive per line. `#` starts a comment; blank lines are ignored.
 <user> : (<options>) <give items...> -> <take items...>
 ```
 
-`<options>` is an `NforM` token meaning **give at most N, receive at least M**.
+`<options>` is an `NforM` token meaning **give any N, receive any M**.
 The simplest case is a one-for-one swap:
 
 ```
@@ -91,14 +96,21 @@ location <user> <lat> <lng>              # user location for the distance KPI
 A bid creates a cash edge only when it clears the ask (`max_price >= ask`) and
 the bidder is not the owner.
 
-### Duplicate cap
+### Take / give caps
 
 ```
-dupcap <user> <item...>     # user receives at most ONE of these copies
+takecap <user> <N> <item...>   # user RECEIVES at most N of these copies
+givecap <user> <N> <item...>   # user GIVES   at most N of these copies
+dupcap  <user> <item...>       # legacy alias for: takecap <user> 1 <item...>
 ```
 
-Use it when several listed items are copies of the *same* game and the user
-wants only one, regardless of whether it arrives by swap or by cash.
+Both count swaps and cash together. `takecap` is receiver-side duplicate
+protection: list copies of the same game so the user ends up with at most N
+regardless of whether they arrive by swap or cash. `givecap` is the give-side
+mirror over the user's **own** copies, list a physical item alongside every
+combo/bundle item that contains it so it can leave at most N times in total
+(e.g. `givecap u 1 A AB` lets `A` go out standalone *or* inside combo `AB`, not
+both). Every `givecap` item must be owned by the named user.
 
 ### Locations (distance KPI)
 
@@ -145,7 +157,49 @@ Settlement plan:
 
 - **Payments** reconstructs who owes whom from the actual item flows.
 - **Settlement plan** is an equivalent, minimal-transfer settlement through the
-  clearinghouse — both discharge the same net balances.
+  clearinghouse, both discharge the same net balances.
+
+
+## Versioning & verifying results
+
+Every run reports the software `version`, the solver's `gurobi_version`, an
+`input_checksum`, and a `result_checksum`. Text output carries them as a `#`
+header; JSON output as top-level fields. To verify a result the website
+published, run the same `version` locally on the same instance and compare
+checksums.
+
+- `input_checksum` hashes the *canonical, normalized* instance, not the raw
+  file — text and JSON that describe the same instance share a checksum, and
+  comments / whitespace / line order never change it.
+- `result_checksum` hashes the canonical result (trades + cash), excluding the
+  metadata fields themselves.
+
+**Determinism caveat.** Gurobi may return a different but equally-optimal
+solution across machines, versions, or thread counts. A matching
+`result_checksum` proves identical plans; a *differing* one whose `kpi` values
+match is a benign alternate optimum, not a wrong answer. This is why `kpi` and
+`gurobi_version` are reported. The solver is not pinned to one thread for
+reproducibility (the speed cost is not worth it).
+
+
+## JSON input/output
+
+Pass a JSON instance (auto-detected, or `--in-format json`):
+
+```json
+{
+  "wishes":    [{"user": "alice", "give": ["A"], "take": ["B"], "n": 1, "m": 1}],
+  "items":     [{"name": "A", "owner": "alice", "ask": 20}],
+  "bids":      [{"user": "bob", "item": "A", "max_price": 25}],
+  "budgets":   [{"user": "alice", "budget": 50}],
+  "locations": [{"user": "u", "lat": -61.39, "lng": 34.22}],
+  "takecaps":  [{"user": "u", "n": 1, "items": ["A", "AB"]}],
+  "givecaps":  [{"user": "u", "n": 1, "items": ["A"]}]
+}
+```
+
+All keys are optional. `wishes[].n`/`.m` default to the give/take list lengths.
+Get JSON output with `--format json`.
 
 
 ## How it works
@@ -154,13 +208,17 @@ Pareto builds one MIP:
 
 - Each swap is a binary edge; bundles route through a virtual combo node so a
   whole `NforM` group activates together.
-- Per item: at most one slot — it can leave via swap *or* be sold for cash, not
+- Per item: at most one slot, it can leave via swap *or* be sold for cash, not
   both. Swap in-flow equals out-flow (you only give an item if you receive one).
-- Per user: `spend (swap receipts + buys, at ask) − earnings (own items sold) ≤
-  budget`. Because earnings count, a user can fund a purchase by selling
-  something in the same plan (cash chains).
-- `dupcap` adds one constraint summing a user's swap-receive and buy indicators
-  over the protected copies to ≤ 1.
+- Per user: `cash spend (buys, at ask), cash earnings (own items sold for cash)
+  ≤ budget`. Only cash moves money, a barter swap is free even when the item
+  carries an ask (the ask is just the *cash* price), so swap legs never touch the
+  budget. Because cash earnings count, a user can fund a purchase by *selling* a
+  game for cash in the same plan (cash chains), but not by bartering one away.
+- `takecap` / `givecap` each add one constraint per group: `takecap` sums a
+  user's swap-receive and buy indicators over the listed copies to ≤ N;
+  `givecap` sums the swap-supply and cash-sale indicators of the user's own
+  copies to ≤ N.
 - KPIs combine lexicographically (Gurobi hierarchical multi-objective): `trades`
   maximizes total moves, `users` maximizes distinct participants, `distance`
   minimizes total owner→receiver shipping km. List order sets priority.
@@ -180,12 +238,32 @@ python main.py testcases/money/cashchain.txt
 ```
 
 
+## Checking a solution
+
+`check.py` independently verifies that a solver output is a **legal** solution,
+without trusting the solver. It re-derives every constraint from the instance:
+each swap is backed by a real wish, no item moves twice (swap or cash), every
+given item has something received in exchange, cash sales clear the ask, and
+`takecap` / `givecap` / budgets hold. It checks legality only (not optimality).
+
+```bash
+python check.py INPUT.txt OUTPUT.txt
+python main.py in.txt | python check.py in.txt -      # OUTPUT '-' reads stdin
+```
+
+Exit `0` prints an `OK` line; exit `1` prints one `VIOLATION: …` per problem.
+Budgets are checked as pure barter, only cash moves money, so a swap-received
+item with an ask is free to the receiver. The solver enforces the same rule, so
+checker and solver agree.
+
+
 ## Testing
 
-`dupcap` has a self-contained subprocess test (no test framework needed):
+The caps have self-contained subprocess tests (no test framework needed):
 
 ```bash
 python test_dupcap.py
+python test_takecap.py
 ```
 
 

@@ -1,0 +1,17 @@
+Trade Results:
+
+Cash Purchases:
+Catan: owen -> alice  (alice pays owen $15)
+TtR: quinn -> owen  (owen pays quinn $15)
+
+Cash Summary:
+  alice: spent $15, earned $0, net $15 (owes) (cap $30)
+  owen: spent $15, earned $15, net $0 (even) (cap $0)
+  quinn: spent $0, earned $15, net $-15 (receives) (cap $0)
+
+Payments:
+  alice pays owen $15
+  owen pays quinn $15
+
+Settlement plan:
+  alice pays quinn $15

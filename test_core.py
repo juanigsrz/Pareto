@@ -28,6 +28,14 @@ def test_parse_money():
     assert inst.bids[("alice", c1)] == 20
 
 
+def test_parse_json_input():
+    obj = '{"items":[{"name":"A","owner":"alice"}],' \
+          '"wishes":[{"user":"alice","give":["A"],"take":["B"]}]}'
+    inst = C.parse(obj)                     # auto-detects JSON from leading '{'
+    assert inst.users == {"alice"}, inst.users
+    assert len(inst.wishes) == 1, inst.wishes
+
+
 def test_parse_bad_latitude():
     try:
         C.parse("location alice 999 0\nalice: (1for1) A -> B\n")
@@ -39,7 +47,7 @@ def test_parse_bad_latitude():
 
 def test_kpi_list_validation():
     assert C.parse_kpi_list("trades,users") == ["trades", "users"]
-    for bad in ("trades,bogus", "trades,trades", "trades,,users"):
+    for bad in ("trades,bogus", "trades,trades", "trades,,users", "distance"):
         try:
             C.parse_kpi_list(bad)
         except Exception:
@@ -49,51 +57,44 @@ def test_kpi_list_validation():
 
 
 def test_solve_swap_trades():
-    res = C.solve(SWAP, kpi=["trades"], want_stats=True)
-    assert res.status == "Optimal", res.status
-    pairs = {(s["give"], s["receive"]) for s in res.swaps}
-    assert ("A", "B") in pairs and ("B", "A") in pairs, res.swaps
-    assert res.stats["swap_vars"] == 2, res.stats
-    assert res.stats["obj"] == 2, res.stats
-    assert res.money_present is False
+    sol = C.solve(SWAP, kpi=["trades"], want_stats=True)
+    assert sol.status == "Optimal", sol.status
+    pairs = {(t["give"], t["take"]) for t in sol.result["trades"]}
+    assert ("A", "B") in pairs and ("B", "A") in pairs, sol.result["trades"]
+    assert sol.result["stats"]["swap_vars"] == 2, sol.result["stats"]
+    assert sol.result["stats"]["kpi"] == {"trades": 2}, sol.result["stats"]
+    assert sol.result["cash_summary"] == []     # pure barter -> no money section
 
 
 def test_solve_money_buy():
-    res = C.solve(MONEY, kpi=["trades"], want_stats=True)
-    assert res.money_present is True
-    items = {p["item"] for p in res.cash_purchases}
-    assert "C1" in items, res.cash_purchases
-    summ = {r["user"]: r for r in res.cash_summary}
+    sol = C.solve(MONEY, kpi=["trades"], want_stats=True)
+    items = {p["item"] for p in sol.result["cash_purchases"]}
+    assert "C1" in items, sol.result["cash_purchases"]
+    summ = {r["user"]: r for r in sol.result["cash_summary"]}
     assert summ["alice"]["spent"] == 10 and summ["alice"]["net"] == 10
-    assert any(p["payer"] == "alice" and p["payee"] == "bob"
-               for p in res.payments), res.payments
+    assert any(p["from"] == "alice" and p["to"] == "bob"
+               for p in sol.result["payments"]), sol.result["payments"]
 
 
 def test_to_dict_money():
     d = S.to_dict(C.solve(MONEY, kpi=["trades"], want_stats=True))
     assert d["status"] == "Optimal"
-    assert d["money_present"] is True
-    assert {"swaps", "combo_trades", "cash_purchases", "cash_summary",
-            "payments", "settlement", "stats"} <= set(d), d.keys()
-    assert "has_solution" not in d, d.keys()
+    # meta stamped onto every document
+    assert {"version", "gurobi_version", "input_checksum", "result_checksum"} <= set(d), d.keys()
+    assert {"trades", "combos", "cash_purchases", "cash_summary",
+            "payments", "settlement", "kpi", "stats"} <= set(d), d.keys()
     assert any(p["item"] == "C1" for p in d["cash_purchases"]), d
-    assert d["stats"]["obj"] == 1, d["stats"]
+    assert d["stats"]["kpi"] == {"trades": 1}, d["stats"]
 
 
 def test_to_dict_barter():
     d = S.to_dict(C.solve(SWAP, kpi=["trades"]))
-    assert d["money_present"] is False
     assert d["cash_purchases"] == [] and d["cash_summary"] == []
-    assert {(s["give"], s["receive"]) for s in d["swaps"]} == {("A", "B"), ("B", "A")}
+    assert {(t["give"], t["take"]) for t in d["trades"]} == {("A", "B"), ("B", "A")}
 
 
 if __name__ == "__main__":
-    test_parse_swap()
-    test_parse_money()
-    test_parse_bad_latitude()
-    test_kpi_list_validation()
-    test_solve_swap_trades()
-    test_solve_money_buy()
-    test_to_dict_money()
-    test_to_dict_barter()
-    print("OK: parse tests passed")
+    for _name, _fn in sorted(list(globals().items())):
+        if _name.startswith("test_"):
+            _fn()
+    print("OK: core tests passed")

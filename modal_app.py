@@ -64,7 +64,7 @@ def validate_request(payload):
 
 image = (modal.Image.debian_slim()
          .pip_install("gurobipy==13.0.2", "fastapi[standard]")
-         .add_local_python_source("pareto_core", "serialize"))
+         .add_local_python_source("pareto_core", "serialize", "pareto_io"))
 
 app = modal.App("pareto", image=image)
 
@@ -89,12 +89,12 @@ def solve_job(req):
     import serialize as S
     try:
         env = _gurobi_env()
-        res = C.solve(
+        sol = C.solve(
             req["instance"], kpi=req["kpi"],
             time_limit=req["time_limit"], mipgap=req["mipgap"],
             env=env, threads=THREADS, want_stats=req["want_stats"],
         )
-        return S.to_dict(res)
+        return S.to_dict(sol)             # versioned, checksummed result document
     except ValueError as e:               # parse / build errors
         return {"status": "error", "error": str(e)}
 

@@ -1,9 +1,21 @@
+"""Command-line front end: read an instance, solve it, print text or JSON.
+
+A thin wrapper over pareto_core.solve + serialize; all solver logic and all
+diagnostic stderr output live in pareto_core so the Modal service shares them.
+"""
 import sys
 import os
 import argparse
 
 import pareto_core as C
-from serialize import to_text
+import serialize as S
+
+
+def _read_source(src):
+    if src == "-":
+        return sys.stdin.read()
+    with open(src, "r") as f:
+        return f.read()
 
 
 def main():
@@ -15,50 +27,32 @@ def main():
                          "Choices: 'trades' = max total trades (default); "
                          "'users' = max users with >= 1 trade; "
                          "'distance' = min total shipping distance (km).")
+    ap.add_argument("--format", choices=("text", "json"), default="text",
+                    help="output format (default: text).")
+    ap.add_argument("--in-format", choices=("auto", "text", "json"), default="auto",
+                    help="input format; 'auto' peeks the first character (default). "
+                         "Read '-' for stdin.")
     args = ap.parse_args()
 
-    with open(args.file) as f:
-        text = f.read()
-
-    time_limit = os.environ.get("PARETO_TIME_LIMIT")
-    mipgap = os.environ.get("PARETO_MIPGAP")
+    raw = _read_source(args.file)
     want_stats = bool(os.environ.get("PARETO_STATS"))
 
-    res = C.solve(
-        text, kpi=args.kpi,
-        time_limit=float(time_limit) if time_limit else None,
-        mipgap=float(mipgap) if mipgap else None,
-        threads=0,                # 0 = Gurobi default (match pre-refactor CLI)
-        want_stats=want_stats,
-    )
+    # text mode lets Gurobi log to stdout (quiet=False); json mode stays silent so
+    # stdout is a single clean JSON document. time_limit/mipgap come from the
+    # PARETO_* env vars inside pareto_core.build (params left None here).
+    sol = C.solve(raw, kpi=args.kpi, in_format=args.in_format,
+                  quiet=(args.format == "json"), want_stats=want_stats)
 
-    if res.status != "Optimal":
-        print(f"WARNING: solver status is {res.status}", file=sys.stderr)
-
-    if want_stats:
-        s = res.stats
-        if isinstance(s["obj"], dict):
-            parts = ",".join(f"{k}={'nan' if v is None else v}"
-                             for k, v in s["obj"].items())
-            obj_str = f"obj[{parts}]"
-            gap = "nan"
-        else:
-            obj_str = f"obj={'nan' if s['obj'] is None else s['obj']}"
-            gap = "nan" if s["gap"] is None else f"{s['gap']:.4f}"
-        print(
-            f"STATS swap_vars={s['swap_vars']} buy_vars={s['buy_vars']} "
-            f"combos={s['combos']} items={s['items']} "
-            f"users_traded={s['users_traded']}/{s['total_users']} "
-            f"status={s['status']} {obj_str} gap={gap} "
-            f"runtime={s['runtime']:.3f}",
-            file=sys.stderr,
-        )
-
-    if not res.has_solution:
+    if not sol.has_solution:
         print("No solution found.", file=sys.stderr)
+        if args.format == "json":
+            print(S.render_json(sol.result, sol.input_checksum), end="")
         sys.exit(0)
 
-    print(to_text(res), end="")
+    if args.format == "json":
+        print(S.render_json(sol.result, sol.input_checksum), end="")
+    else:
+        print(S.render_text(sol.result, sol.input_checksum), end="")
 
 
 if __name__ == "__main__":

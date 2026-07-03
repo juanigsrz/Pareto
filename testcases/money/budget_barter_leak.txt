@@ -1,0 +1,12 @@
+# Minimal repro: barter "earnings" must NOT fund a cash purchase.
+# U (cap 10) barters away G (ask 100) for V's GV, then tries to buy H ($50 cash).
+# Real cash for U: pays $50, receives $0 -> net $50, OVER the $10 cap.
+# The solver currently allows it by crediting G's $100 ask as phantom earnings
+# (net 50-100 = -50 <= 10). A correct cash budget must reject U's buy.
+# Expected after fix: only the G<->GV barter fires (2 trades), no cash buy.
+user U budget 10
+item G owner U ask 100
+item H owner W ask 50
+bid U H 50
+U: (1for1) G -> GV
+V: (1for1) GV -> G

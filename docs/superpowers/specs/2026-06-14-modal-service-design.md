@@ -41,43 +41,49 @@ module scope moves into functions.
 - `parse(text: str) -> Instance`
   - Port of current `parse_file`, reading from a string instead of a path.
   - `Instance` is a dataclass holding the parsed state currently kept in module
-    globals: `wishes, users, budget, owner, ask, bids, dup_groups, location,
-    item_to_id, id_to_item`.
+    state on an `Instance` dataclass (`wishes, users, budget, owner, ask, bids,
+    take_groups, give_groups, location, item_to_id, id_to_item`) so many solves
+    can share one process without leakage. Text and JSON input are both accepted
+    (`parse(raw, in_format="auto")`).
   - Parse/validation errors raise `ValueError` (as today).
-- `build(instance, kpi, time_limit, mipgap, *, env=None, threads=8) -> Model`
-  - Builds the MIP exactly as today (edges, combos, cash buys, dupcap, budgets,
-    KPIs, lexicographic multi-objective).
+- `build(inst, kpi, *, env=None, quiet=True, threads=None, time_limit=None, mipgap=None, want_stats=False) -> Build`
+  - Builds the MIP exactly as the CLI does: hub-and-spoke compaction, combos,
+    cash buys, takecap/givecap, cash-only budgets, KPIs, lexicographic
+    multi-objective, plus the `PARETO_*` env knobs (FAST, NOHUB, GAPABS, …).
   - Accepts an optional Gurobi `env` so the Modal worker can inject WLS
-    credentials; the CLI passes `None` to use the default local license.
-  - Sets `model.Params.Threads = threads`, `TimeLimit`, `MIPGap`,
-    `OutputFlag = 0`.
-- `solve(text, kpi=["trades"], time_limit=None, mipgap=None, *, env=None, threads=8) -> Result`
-  - Orchestrates parse → build → `optimize()` → collect into `Result`.
+    credentials; the CLI passes `None` (default local license). `quiet` picks the
+    silent env / `OutputFlag`; `time_limit`/`mipgap` fall back to `PARETO_*` env.
+- `solve(raw, kpi=("trades",), *, in_format="auto", env=None, quiet=True, threads=None, time_limit=None, mipgap=None, want_stats=False) -> Solution`
+  - Orchestrates parse → build → `optimize()` → `collect()`.
 
-`Result` dataclass:
+`Solution` dataclass: `result` (the dict below), `input_checksum`, `status`,
+`has_solution`. The canonical result dict (identical to the CLI's `--format json`
+body, minus the meta header) is:
 
 ```
 status: str                 # "Optimal" | "TimeLimit" | "Infeasible" | "Status<n>"
-money_present: bool
-stats: dict                 # swap_vars, buy_vars, combos, items,
-                            # users_traded, total_users, obj, gap, runtime
-swaps: list                 # {"give": <item>, "receive": <item>}
-combo_trades: list          # {"sent": [<item>...], "taken": [<item>...]}
+kpi: dict                   # {kpi_name: value or null}; distance reported positive
+trades: list                # {"give": <item>, "take": <item>}
+combos: list                # {"sent": [<item>...], "taken": [<item>...]}
 cash_purchases: list        # {"item", "from", "to", "price"}
-cash_summary: list          # {"user", "spent", "earned", "net", "direction", "cap"}
-payments: list              # {"payer", "payee", "amount"}
-settlement: list            # {"payer", "payee", "amount"}
+cash_summary: list          # {"user", "spent", "earned", "net", "cap"}
+payments: list              # {"from", "to", "amount"}
+settlement: list            # {"from", "to", "amount"}
+stats: dict                 # (only when want_stats) swap_vars, buy_vars, combos,
+                            # items, users_traded, total_users, kpi, runtime
 ```
 
-`stats.obj` mirrors today: a single number for one KPI, or a per-objective map
-for a lexicographic list. `gap` is `null` under multi-objective.
+All lists are canonically sorted, so an equal solution serializes identically
+regardless of Gurobi variable order or hash seed.
 
 ### `serialize.py` — output renderers
 
-- `to_text(Result) -> str` — reproduces today's stdout **byte-for-byte**
-  (`Trade Results`, combo lines, `Cash Purchases`, `Cash Summary`, `Payments`,
-  `Settlement plan`). This is the contract that locks the refactor.
-- `to_dict(Result) -> dict` — the structured JSON body.
+- `render_text(result, input_checksum=None) -> str` / `to_text(Solution)` —
+  reproduces the CLI stdout **byte-for-byte** (`Trade Results`, combo lines,
+  `Cash Purchases`, `Cash Summary`, `Payments`, `Settlement plan`), with an
+  optional `# pareto … / # input_checksum / # result_checksum` header.
+- `render_json(result, checksum)` / `to_dict(Solution) -> dict` — the structured
+  JSON body: `{version, gurobi_version, input_checksum, result_checksum, **result}`.
 
 ### `main.py` — thin CLI (back-compat)
 
