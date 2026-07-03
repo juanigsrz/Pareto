@@ -3,10 +3,14 @@ import os
 import re
 import math
 import time
+import json
 import argparse
 from collections import defaultdict
 import gurobipy as gp
 from gurobipy import GRB
+import pareto_io
+
+__version__ = "1.0.0"
 
 item_to_id = {}
 id_to_item = {}
@@ -73,72 +77,114 @@ def parse_wish_body(body, line):
 
 
 # Handle input
-def parse_file(_file):
-    with open(_file, 'r') as f:
-        for raw in f:
-            line = raw.partition('#')[0].strip()
-            if not line:
-                continue
+def parse_text(text):
+    for raw in text.splitlines(keepends=True):
+        line = raw.partition('#')[0].strip()
+        if not line:
+            continue
 
-            m_user = re.fullmatch(r'user\s+(\S+)\s+budget\s+(\d+)', line)
-            m_item = re.fullmatch(r'item\s+(\S+)\s+owner\s+(\S+)(?:\s+ask\s+(\d+))?', line)
-            m_bid = re.fullmatch(r'bid\s+(\S+)\s+(\S+)\s+(\d+)', line)
-            m_take = re.fullmatch(r'takecap\s+(\S+)\s+(\d+)\s+(.+)', line)
-            m_give = re.fullmatch(r'givecap\s+(\S+)\s+(\d+)\s+(.+)', line)
-            m_dup = re.fullmatch(r'dupcap\s+(\S+)\s+(.+)', line)
-            m_loc = re.fullmatch(
-                r'location\s+(\S+)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)', line)
+        m_user = re.fullmatch(r'user\s+(\S+)\s+budget\s+(\d+)', line)
+        m_item = re.fullmatch(r'item\s+(\S+)\s+owner\s+(\S+)(?:\s+ask\s+(\d+))?', line)
+        m_bid = re.fullmatch(r'bid\s+(\S+)\s+(\S+)\s+(\d+)', line)
+        m_take = re.fullmatch(r'takecap\s+(\S+)\s+(\d+)\s+(.+)', line)
+        m_give = re.fullmatch(r'givecap\s+(\S+)\s+(\d+)\s+(.+)', line)
+        m_dup = re.fullmatch(r'dupcap\s+(\S+)\s+(.+)', line)
+        m_loc = re.fullmatch(
+            r'location\s+(\S+)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)', line)
 
-            if m_user:
-                users.add(m_user.group(1))
-                budget[m_user.group(1)] = int(m_user.group(2))
-            elif m_item:
-                iid = intern(m_item.group(1))
-                u = m_item.group(2)
-                users.add(u)
-                set_owner(iid, u, raw)
-                if m_item.group(3) is not None:
-                    ask[iid] = int(m_item.group(3))
-            elif m_bid:
-                u = m_bid.group(1)
-                users.add(u)
-                iid = intern(m_bid.group(2))
-                bids[(u, iid)] = int(m_bid.group(3))
-            elif m_take:
-                u = m_take.group(1)
-                users.add(u)
-                take_groups.append((u, int(m_take.group(2)),
-                                    [intern(t) for t in m_take.group(3).split()]))
-            elif m_give:
-                u = m_give.group(1)
-                users.add(u)
-                give_groups.append((u, int(m_give.group(2)),
-                                    [intern(t) for t in m_give.group(3).split()]))
-            elif m_dup:
-                u = m_dup.group(1)
-                users.add(u)
-                take_groups.append((u, 1, [intern(t) for t in m_dup.group(2).split()]))
-            elif m_loc:
-                u = m_loc.group(1)
-                lat = float(m_loc.group(2))
-                lng = float(m_loc.group(3))
-                if not (-90 <= lat <= 90):
-                    raise ValueError(f"latitude out of range [-90, 90]: {raw}")
-                if not (-180 <= lng <= 180):
-                    raise ValueError(f"longitude out of range [-180, 180]: {raw}")
-                users.add(u)
-                location[u] = (lat, lng)
-            elif ':' in line:
-                u, _, body = line.partition(':')
-                u = u.strip()
-                users.add(u)
-                give, take, N, M = parse_wish_body(body.strip(), raw)
-                for g in give:
-                    set_owner(g, u, raw)  # giving an item implies owning it
-                wishes.append((u, give, take, N, M))
-            else:
-                raise ValueError(f"Unrecognized line: {raw}")
+        if m_user:
+            users.add(m_user.group(1))
+            budget[m_user.group(1)] = int(m_user.group(2))
+        elif m_item:
+            iid = intern(m_item.group(1))
+            u = m_item.group(2)
+            users.add(u)
+            set_owner(iid, u, raw)
+            if m_item.group(3) is not None:
+                ask[iid] = int(m_item.group(3))
+        elif m_bid:
+            u = m_bid.group(1)
+            users.add(u)
+            iid = intern(m_bid.group(2))
+            bids[(u, iid)] = int(m_bid.group(3))
+        elif m_take:
+            u = m_take.group(1)
+            users.add(u)
+            take_groups.append((u, int(m_take.group(2)),
+                                [intern(t) for t in m_take.group(3).split()]))
+        elif m_give:
+            u = m_give.group(1)
+            users.add(u)
+            give_groups.append((u, int(m_give.group(2)),
+                                [intern(t) for t in m_give.group(3).split()]))
+        elif m_dup:
+            u = m_dup.group(1)
+            users.add(u)
+            take_groups.append((u, 1, [intern(t) for t in m_dup.group(2).split()]))
+        elif m_loc:
+            u = m_loc.group(1)
+            lat = float(m_loc.group(2))
+            lng = float(m_loc.group(3))
+            if not (-90 <= lat <= 90):
+                raise ValueError(f"latitude out of range [-90, 90]: {raw}")
+            if not (-180 <= lng <= 180):
+                raise ValueError(f"longitude out of range [-180, 180]: {raw}")
+            users.add(u)
+            location[u] = (lat, lng)
+        elif ':' in line:
+            u, _, body = line.partition(':')
+            u = u.strip()
+            users.add(u)
+            give, take, N, M = parse_wish_body(body.strip(), raw)
+            for g in give:
+                set_owner(g, u, raw)  # giving an item implies owning it
+            wishes.append((u, give, take, N, M))
+        else:
+            raise ValueError(f"Unrecognized line: {raw}")
+    _post_parse_checks()
 
+
+def parse_json_input(obj):
+    for u in obj.get("budgets", []):
+        users.add(u["user"]); budget[u["user"]] = int(u["budget"])
+    for it in obj.get("items", []):
+        iid = intern(it["name"]); users.add(it["owner"])
+        set_owner(iid, it["owner"], f"item {it['name']}")
+        if "ask" in it:
+            ask[iid] = int(it["ask"])
+    for b in obj.get("bids", []):
+        users.add(b["user"])
+        bids[(b["user"], intern(b["item"]))] = int(b["max_price"])
+    for lo in obj.get("locations", []):
+        lat, lng = float(lo["lat"]), float(lo["lng"])
+        if not (-90 <= lat <= 90):
+            raise ValueError(f"latitude out of range [-90, 90]: {lo}")
+        if not (-180 <= lng <= 180):
+            raise ValueError(f"longitude out of range [-180, 180]: {lo}")
+        users.add(lo["user"]); location[lo["user"]] = (lat, lng)
+    for c in obj.get("takecaps", []):
+        users.add(c["user"])
+        take_groups.append((c["user"], int(c["n"]),
+                            [intern(t) for t in c["items"]]))
+    for c in obj.get("givecaps", []):
+        users.add(c["user"])
+        give_groups.append((c["user"], int(c["n"]),
+                            [intern(t) for t in c["items"]]))
+    for w in obj.get("wishes", []):
+        u = w["user"]; users.add(u)
+        give = [intern(t) for t in w["give"]]
+        take = [intern(t) for t in w["take"]]
+        N = int(w.get("n", len(give))); M = int(w.get("m", len(take)))
+        if N > len(give) or M > len(take):
+            warn(f"combo can never activate: asks to give {N} of {len(give)} listed "
+                 f"and take {M} of {len(take)} listed: {w}")
+        for g in give:
+            set_owner(g, u, f"wish {u}")  # giving an item implies owning it
+        wishes.append((u, give, take, N, M))
+    _post_parse_checks()
+
+
+def _post_parse_checks():
     # A cap that names an item nobody owns is almost always a typo: the phantom item
     # matches no real copy, so it silently protects nothing (weakening dup/give limits).
     cap_iids = set()
@@ -150,6 +196,27 @@ def parse_file(_file):
         if _iid not in owner:
             warn(f"cap references item '{id_to_item[_iid]}' with no declared owner "
                  f"(typo? it protects nothing)")
+
+
+def _read_source(src):
+    if src == "-":
+        return sys.stdin.read()
+    with open(src, "r") as f:
+        return f.read()
+
+
+def load_input(src, in_format):
+    raw = _read_source(src)
+    if in_format == "auto":
+        in_format = pareto_io.detect_input_format(raw)
+    if in_format == "json":
+        parse_json_input(json.loads(raw))
+    else:
+        parse_text(raw)
+
+
+def parse_file(_file):
+    parse_text(_read_source(_file))
 
 
 _argp = argparse.ArgumentParser()
@@ -186,11 +253,63 @@ _argp.add_argument("--kpi", type=parse_kpi_list, default=["trades"],
                         "Choices: 'trades' = max total trades (default); "
                         "'users' = max users with >= 1 trade; "
                         "'distance' = min total shipping distance (km).")
+_argp.add_argument("--format", choices=("text", "json"), default="text",
+                   help="output format (default: text).")
+_argp.add_argument("--in-format", choices=("auto", "text", "json"), default="auto",
+                   help="input format; 'auto' peeks the first character (default). "
+                        "Read '-' for stdin.")
 _args = _argp.parse_args()
-parse_file(_args.file)
+load_input(_args.file, _args.in_format)
 
-model = gp.Model()
-model.Params.OutputFlag = 1
+
+def normalized_input():
+    """Canonical, format-independent view of the parsed instance for hashing.
+    Item ids are resolved to names; lists are sorted where order is semantically
+    irrelevant so equal instances hash equally regardless of source ordering."""
+    def name(iid):
+        return id_to_item[iid]
+    wishes_out = sorted(
+        ({"user": u, "give": sorted(name(g) for g in give),
+          "take": sorted(name(t) for t in take), "n": N, "m": M}
+         for (u, give, take, N, M) in wishes),
+        key=lambda w: (w["user"], w["give"], w["take"], w["n"], w["m"]))
+    items_out = sorted(
+        ({"name": name(iid), "owner": o, **({"ask": ask[iid]} if iid in ask else {})}
+         for iid, o in owner.items()),
+        key=lambda it: it["name"])
+    bids_out = sorted(
+        ({"user": u, "item": name(iid), "max_price": y}
+         for (u, iid), y in bids.items()),
+        key=lambda b: (b["user"], b["item"]))
+    budgets_out = sorted(
+        ({"user": u, "budget": b} for u, b in budget.items()),
+        key=lambda x: x["user"])
+    locations_out = sorted(
+        ({"user": u, "lat": lat, "lng": lng} for u, (lat, lng) in location.items()),
+        key=lambda x: x["user"])
+    takecaps_out = sorted(
+        ({"user": u, "n": n, "items": sorted(name(i) for i in iids)}
+         for (u, n, iids) in take_groups),
+        key=lambda x: (x["user"], x["n"], x["items"]))
+    givecaps_out = sorted(
+        ({"user": u, "n": n, "items": sorted(name(i) for i in iids)}
+         for (u, n, iids) in give_groups),
+        key=lambda x: (x["user"], x["n"], x["items"]))
+    return {"wishes": wishes_out, "items": items_out, "bids": bids_out,
+            "budgets": budgets_out, "locations": locations_out,
+            "takecaps": takecaps_out, "givecaps": givecaps_out}
+
+
+_input_checksum = pareto_io.checksum(normalized_input())
+
+if _args.format == "json":
+    _env = gp.Env(empty=True)
+    _env.setParam("OutputFlag", 0)
+    _env.start()
+    model = gp.Model(env=_env)
+else:
+    model = gp.Model()
+model.Params.OutputFlag = 0 if _args.format == "json" else 1
 model.Params.Symmetry = 2
 
 edge_vars = {}        # (i, j) -> binary var
@@ -607,98 +726,177 @@ if os.environ.get("PARETO_STATS"):
         file=sys.stderr,
     )
 
-if model.SolCount == 0:
-    print("No solution found.", file=sys.stderr)
-    sys.exit(0)
-
 
 def active(var):
     return var.X > 0.5
 
 
-print("\nTrade Results:")
-for (i, j), var in edge_vars.items():
-    if active(var) and i in id_to_item and j in id_to_item:
-        print(f"{id_to_item[j]} -> {id_to_item[i]}")
+def kpi_values():
+    if model.SolCount == 0:
+        return {k: None for k in _args.kpi}
+    vals = {}
+    if len(_args.kpi) == 1:
+        raw = model.ObjVal
+        vals[_args.kpi[0]] = int(round(-raw if _args.kpi[0] == "distance" else raw))
+    else:
+        for k, kpi in enumerate(_args.kpi):
+            model.params.ObjNumber = k
+            raw = model.ObjNVal
+            vals[kpi] = int(round(-raw if kpi == "distance" else raw))
+    return vals
 
-for in_pairs, out_pairs in combo_records:
-    if any(active(v) for _, v in in_pairs + out_pairs):
-        sent = [id_to_item[s] for s, v in out_pairs if active(v)]
-        taken = [id_to_item[t] for t, v in in_pairs if active(v)]
-        print(*sent, sep=' ', end='')
-        print(" -> ", end='')
-        print(*taken, sep=' ')
 
-show_money = bool(buy) or bool(ask) or bool(budget)
-if show_money:
-    cash_moves = [(u, iid) for (u, iid), v in buy.items() if active(v)]
-    if cash_moves:
-        print("\nCash Purchases:")
-        for (u, iid) in cash_moves:
-            o = owner[iid]
-            print(f"{id_to_item[iid]}: {o} -> {u}  ({u} pays {o} ${ask.get(iid, 0)})")
+def build_result():
+    if model.SolCount == 0:
+        return {
+            "status": status,
+            "kpi": kpi_values(),
+            "trades": [], "combos": [],
+            "cash_purchases": [], "cash_summary": [],
+            "payments": [], "settlement": [],
+        }
 
-    # Per-user net: every active cash buy means the buyer owes ask[item] to the item's
-    # owner. Barter swaps are free, so they never appear here. spent - earned > 0 => owes,
-    # < 0 => receives.
-    net = {}
-    print("\nCash Summary:")
-    for u in sorted(users):
-        spent = sum(c for c, v in spend_data[u] if active(v))
-        earned = sum(c for c, v in earn_data[u] if active(v))
-        net[u] = spent - earned
-        cap = budget[u] if u in budget else "inf"
-        direction = "owes" if net[u] > 0 else "receives" if net[u] < 0 else "even"
-        print(f"  {u}: spent ${spent:g}, earned ${earned:g}, "
-              f"net ${net[u]:g} ({direction}) (cap ${cap})")
-    assert sum(net.values()) == 0, "cash nets must balance to zero"
+    trades = []
+    for (i, j), var in edge_vars.items():
+        if active(var) and i in id_to_item and j in id_to_item:
+            trades.append({"give": id_to_item[j], "take": id_to_item[i]})
 
-    # Itemized payments: reconstruct who owes whom from the active cash buys, then net
-    # pairwise so A<->B collapses to a single directed line. Traceable to the items.
-    # Only cash buys move money; barter swaps are free, so they create no payment.
-    flows = {}  # (payer, payee) -> amount
+    combos = []
+    for in_pairs, out_pairs in combo_records:
+        if any(active(v) for _, v in in_pairs + out_pairs):
+            combos.append({
+                "sent": [id_to_item[s] for s, v in out_pairs if active(v)],
+                "taken": [id_to_item[t] for t, v in in_pairs if active(v)],
+            })
 
-    def add_flow(payer, payee, amt):
-        if amt and payer != payee:
-            flows[(payer, payee)] = flows.get((payer, payee), 0) + amt
+    has_money = bool(buy) or bool(ask) or bool(budget)
+    cash_purchases, cash_summary, payments, settlement = [], [], [], []
+    if has_money:
+        for (u, iid), v in buy.items():
+            if active(v):
+                cash_purchases.append({
+                    "item": id_to_item[iid], "from": owner[iid],
+                    "to": u, "price": ask.get(iid, 0)})
+        net = {}
+        for u in sorted(users):
+            spent = sum(c for c, v in spend_data[u] if active(v))
+            earned = sum(c for c, v in earn_data[u] if active(v))
+            net[u] = spent - earned
+            cash_summary.append({
+                "user": u, "spent": spent, "earned": earned, "net": net[u],
+                "cap": budget[u] if u in budget else None})
+        assert sum(net.values()) == 0, "cash nets must balance to zero"
 
-    for (u, iid), v in buy.items():
-        if active(v):
-            add_flow(u, owner[iid], ask.get(iid, 0))
+        flows = {}
+        def add_flow(payer, payee, amt):
+            if amt and payer != payee:
+                flows[(payer, payee)] = flows.get((payer, payee), 0) + amt
+        for (u, iid), v in buy.items():
+            if active(v):
+                add_flow(u, owner[iid], ask.get(iid, 0))
+        printed = set()
+        for (a, b) in list(flows):
+            if (a, b) in printed or (b, a) in printed:
+                continue
+            pair_net = flows.get((a, b), 0) - flows.get((b, a), 0)
+            if pair_net > 0:
+                payments.append({"from": a, "to": b, "amount": pair_net})
+            elif pair_net < 0:
+                payments.append({"from": b, "to": a, "amount": -pair_net})
+            printed.add((a, b)); printed.add((b, a))
 
-    printed = set()
-    payment_lines = []
-    for (a, b) in list(flows):
-        if (a, b) in printed or (b, a) in printed:
-            continue
-        pair_net = flows.get((a, b), 0) - flows.get((b, a), 0)
-        if pair_net > 0:
-            payment_lines.append(f"  {a} pays {b} ${pair_net:g}")
-        elif pair_net < 0:
-            payment_lines.append(f"  {b} pays {a} ${-pair_net:g}")
-        printed.add((a, b))
-        printed.add((b, a))
-    if payment_lines:
-        print("\nPayments:")
-        print(*payment_lines, sep="\n")
-
-    # Settlement plan: money is fungible through the clearinghouse, so settle each
-    # user's net with the fewest transfers (greedy largest-debtor vs largest-creditor).
-    # NOTE: this pays different counterparties than Payments above; both are valid
-    # executions of the same outcome (budgets constrain nets, not pairwise flows).
-    debtors = sorted(((u, n) for u, n in net.items() if n > 0), key=lambda x: -x[1])
-    creditors = sorted(((u, -n) for u, n in net.items() if n < 0), key=lambda x: -x[1])
-    if debtors:
-        print("\nSettlement plan:")
+        debtors = sorted(((u, n) for u, n in net.items() if n > 0), key=lambda x: -x[1])
+        creditors = sorted(((u, -n) for u, n in net.items() if n < 0), key=lambda x: -x[1])
         i = j = 0
         while i < len(debtors) and j < len(creditors):
-            du, dn = debtors[i]
-            cu, cn = creditors[j]
+            du, dn = debtors[i]; cu, cn = creditors[j]
             pay = min(dn, cn)
-            print(f"  {du} pays {cu} ${pay:g}")
-            debtors[i] = (du, dn - pay)
-            creditors[j] = (cu, cn - pay)
-            if debtors[i][1] == 0:
-                i += 1
-            if creditors[j][1] == 0:
-                j += 1
+            settlement.append({"from": du, "to": cu, "amount": pay})
+            debtors[i] = (du, dn - pay); creditors[j] = (cu, cn - pay)
+            if debtors[i][1] == 0: i += 1
+            if creditors[j][1] == 0: j += 1
+
+    # Canonical sort: a given solution must serialize identically regardless of
+    # Gurobi variable-creation order / Python hash seed.
+    trades.sort(key=lambda t: (t["give"], t["take"]))
+    for c in combos:
+        c["sent"].sort(); c["taken"].sort()
+    combos.sort(key=lambda c: (c["sent"], c["taken"]))
+    cash_purchases.sort(key=lambda p: (p["item"], p["from"], p["to"]))
+    payments.sort(key=lambda p: (p["from"], p["to"]))
+    settlement.sort(key=lambda p: (p["from"], p["to"]))
+    # cash_summary is already built in sorted(users) order.
+
+    return {
+        "status": status,
+        "kpi": kpi_values(),
+        "trades": trades, "combos": combos,
+        "cash_purchases": cash_purchases, "cash_summary": cash_summary,
+        "payments": payments, "settlement": settlement,
+    }
+
+
+def render_text(result, input_checksum=None):
+    out = []
+    if input_checksum is not None:
+        m = _meta(result, input_checksum)
+        out += [f"# pareto {m['version']}  gurobi {m['gurobi_version']}",
+                f"# input_checksum  {m['input_checksum']}",
+                f"# result_checksum {m['result_checksum']}"]
+    out.append("\nTrade Results:")
+    for t in result["trades"]:
+        out.append(f"{t['give']} -> {t['take']}")
+    for c in result["combos"]:
+        out.append(" ".join(c["sent"]) + " -> " + " ".join(c["taken"]))
+    if result["cash_summary"] or result["cash_purchases"]:
+        if result["cash_purchases"]:
+            out.append("\nCash Purchases:")
+            for p in result["cash_purchases"]:
+                out.append(f"{p['item']}: {p['from']} -> {p['to']}  "
+                           f"({p['to']} pays {p['from']} ${p['price']})")
+        out.append("\nCash Summary:")
+        for s in result["cash_summary"]:
+            cap = "inf" if s["cap"] is None else f"{s['cap']}"
+            direction = "owes" if s["net"] > 0 else "receives" if s["net"] < 0 else "even"
+            out.append(f"  {s['user']}: spent ${s['spent']:g}, earned ${s['earned']:g}, "
+                       f"net ${s['net']:g} ({direction}) (cap ${cap})")
+        if result["payments"]:
+            out.append("\nPayments:")
+            for p in result["payments"]:
+                out.append(f"  {p['from']} pays {p['to']} ${p['amount']:g}")
+        if result["settlement"]:
+            out.append("\nSettlement plan:")
+            for p in result["settlement"]:
+                out.append(f"  {p['from']} pays {p['to']} ${p['amount']:g}")
+    return "\n".join(out) + "\n"
+
+
+def _gurobi_version():
+    try:
+        return ".".join(str(x) for x in gp.gurobi.version())
+    except Exception:
+        return "unknown"
+
+
+def _meta(result, input_checksum):
+    return {"version": __version__, "gurobi_version": _gurobi_version(),
+            "input_checksum": input_checksum,
+            "result_checksum": pareto_io.checksum(result)}
+
+
+def render_json(result, input_checksum):
+    doc = {**_meta(result, input_checksum), **result}
+    return json.dumps(doc, indent=2) + "\n"
+
+
+if model.SolCount == 0:
+    print("No solution found.", file=sys.stderr)
+    if _args.format == "json":
+        print(render_json(build_result(), _input_checksum), end="")
+    sys.exit(0)
+
+_result = build_result()
+if _args.format == "json":
+    print(render_json(_result, _input_checksum), end="")
+else:
+    print(render_text(_result, _input_checksum), end="")

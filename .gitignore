@@ -44,3 +44,6 @@ inst.txt
 
 # Gurobi
 gurobi.env
+
+# Golden characterization outputs are committed fixtures, not build artifacts
+!testcases/golden/*.out

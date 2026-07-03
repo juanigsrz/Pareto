@@ -54,6 +54,8 @@ Options and environment variables:
 | Flag / Env | Effect |
 |---|---|
 | `--kpi <list>` | Comma-separated objectives in priority order (leftmost first), e.g. `--kpi trades,users`. Choices: `trades` = max total trades (default); `users` = max users with ≥ 1 trade; `distance` = min total shipping distance (km). |
+| `--format <text\|json>` | Output format. `text` (default) prints the sections below plus a `#` verification header; `json` prints one structured document. |
+| `--in-format <auto\|text\|json>` | Input format. `auto` (default) detects JSON by a leading `{`. Read `-` for stdin. |
 | `PARETO_TIME_LIMIT` | Solver time limit, seconds. |
 | `PARETO_MIPGAP` | Accept a solution within this relative MIP gap. |
 | `PARETO_STATS` | Print a `STATS …` line (vars, objective, gap, runtime) to stderr. |
@@ -156,6 +158,48 @@ Settlement plan:
 - **Payments** reconstructs who owes whom from the actual item flows.
 - **Settlement plan** is an equivalent, minimal-transfer settlement through the
   clearinghouse, both discharge the same net balances.
+
+
+## Versioning & verifying results
+
+Every run reports the software `version`, the solver's `gurobi_version`, an
+`input_checksum`, and a `result_checksum`. Text output carries them as a `#`
+header; JSON output as top-level fields. To verify a result the website
+published, run the same `version` locally on the same instance and compare
+checksums.
+
+- `input_checksum` hashes the *canonical, normalized* instance, not the raw
+  file — text and JSON that describe the same instance share a checksum, and
+  comments / whitespace / line order never change it.
+- `result_checksum` hashes the canonical result (trades + cash), excluding the
+  metadata fields themselves.
+
+**Determinism caveat.** Gurobi may return a different but equally-optimal
+solution across machines, versions, or thread counts. A matching
+`result_checksum` proves identical plans; a *differing* one whose `kpi` values
+match is a benign alternate optimum, not a wrong answer. This is why `kpi` and
+`gurobi_version` are reported. The solver is not pinned to one thread for
+reproducibility (the speed cost is not worth it).
+
+
+## JSON input/output
+
+Pass a JSON instance (auto-detected, or `--in-format json`):
+
+```json
+{
+  "wishes":    [{"user": "alice", "give": ["A"], "take": ["B"], "n": 1, "m": 1}],
+  "items":     [{"name": "A", "owner": "alice", "ask": 20}],
+  "bids":      [{"user": "bob", "item": "A", "max_price": 25}],
+  "budgets":   [{"user": "alice", "budget": 50}],
+  "locations": [{"user": "u", "lat": -61.39, "lng": 34.22}],
+  "takecaps":  [{"user": "u", "n": 1, "items": ["A", "AB"]}],
+  "givecaps":  [{"user": "u", "n": 1, "items": ["A"]}]
+}
+```
+
+All keys are optional. `wishes[].n`/`.m` default to the give/take list lengths.
+Get JSON output with `--format json`.
 
 
 ## How it works
