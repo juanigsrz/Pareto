@@ -1,0 +1,15 @@
+Trade Results:
+
+Cash Purchases:
+C1: bob -> alice  (alice pays bob $10)
+
+Cash Summary:
+  alice: spent $10, earned $0, net $10 (owes) (cap $inf)
+  bob: spent $0, earned $10, net $-10 (receives) (cap $inf)
+  carol: spent $0, earned $0, net $0 (even) (cap $inf)
+
+Payments:
+  alice pays bob $10
+
+Settlement plan:
+  alice pays bob $10
