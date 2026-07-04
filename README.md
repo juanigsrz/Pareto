@@ -78,8 +78,8 @@ The simplest case is a one-for-one swap:
 
 ```
 alice : (1for1) A -> B          # alice gives A, wants B
-u1    : (2for1) A B -> X         # give up to 2 of {A, B}, receive ≥ 1 of {X}
-u5    : (1for2) Catan -> Azul TTR  # give Catan, receive ≥ 2 of {Azul, TTR}
+u1    : (2for1) A B -> X         # give any 2 of {A, B}, receive any 1 of {X}
+u5    : (1for2) Catan -> Azul TTR  # give Catan, receive any 2 of {Azul, TTR}
 ```
 
 Listing an item on the *give* side declares the user as its owner.
@@ -134,7 +134,7 @@ A -> B
 B -> A
 ```
 
-`X -> Y` reads "Y is given so that X is received" for each active move; bundle
+`X -> Y` reads "X is given so that Y is received" for each active move; bundle
 trades print as `sent... -> taken...`. With cash:
 
 ```

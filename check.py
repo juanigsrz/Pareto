@@ -172,6 +172,9 @@ def check(inst, swap_moves, cash_moves):
             if it not in owner:
                 v.append(f"swap move {given} -> {received}: received item '{it}' "
                          f"has no declared owner")
+            elif u is not None and owner[it] == u:
+                v.append(f"swap move {given} -> {received}: '{u}' receives item "
+                         f"'{it}' they already own (phantom self-trade)")
         for it in given:
             bump(g_count, it)
         for it in received:

@@ -302,6 +302,24 @@ def normalized_input():
 
 _input_checksum = pareto_io.checksum(normalized_input())
 
+# A user can never legitimately barter-receive an item they already own: the cash
+# side refuses self-buys ("don't buy your own item"), but a take-leg on an own item
+# lets the solver book phantom trades (a self-loop A -> A, or a self-cycle across
+# two wishes) that inflate every KPI while moving nothing. Mirror the cash rule and
+# drop those take legs before the model is built. Runs after the checksum so
+# input_checksum still reflects the instance as declared.
+_sanitized = []
+for _user, _give, _take, _N, _M in wishes:
+    _kept = [t for t in _take if owner.get(t) != _user]
+    if len(_kept) != len(_take):
+        _dropped = " ".join(id_to_item[t] for t in _take if owner.get(t) == _user)
+        warn(f"wish of '{_user}' takes item(s) they own; dropped: {_dropped}")
+        if _M > len(_kept):
+            warn(f"combo can never activate: asks to take {_M} but only "
+                 f"{len(_kept)} listed items remain after dropping own items")
+    _sanitized.append((_user, _give, _kept, _N, _M))
+wishes = _sanitized
+
 if _args.format == "json":
     _env = gp.Env(empty=True)
     _env.setParam("OutputFlag", 0)
@@ -345,7 +363,12 @@ hub_keys = set()       # (user, frozenset(take)) consumed by a hub -> skipped be
 if not os.environ.get("PARETO_NOHUB"):
     _dup_sets = defaultdict(set)
     for _u, _n, _iids in take_groups:
-        _dup_sets[_u].add(frozenset(_iids))
+        # Only n == 1 rows qualify: the hub's <= 1 receipt cap is supplied by this
+        # row. An n >= 2 cap would let the hub activate several gives at once and
+        # print one multi-give bundle line that no single 1for1 wish backs
+        # (check.py rightly rejects it); those groups must build naively.
+        if _n == 1:
+            _dup_sets[_u].add(frozenset(_iids))
     _gives = defaultdict(list)   # (user, frozenset(take)) -> [(give_item, take_ids), ...]
     for _user, _send, _take, _N, _M in wishes:
         if len(_send) == 1 and _N == 1 and _M == 1 and _take:  # true 1-for-1 only (N==1)
