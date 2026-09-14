@@ -13,7 +13,20 @@ import random
 import sys
 
 
-def generate(users, items_per_user, wants, money, bundle, seed, bundles_per_user=-1):
+def parse_cities(spec):
+    """'CABA:45,Cordoba:10,...' -> [(name, weight), ...]; a bare name weighs 1."""
+    out = []
+    for tok in spec.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        name, _, w = tok.partition(":")
+        out.append((name.strip(), float(w) if w else 1.0))
+    return out
+
+
+def generate(users, items_per_user, wants, money, bundle, seed, bundles_per_user=-1,
+             cities=None, hub=None, boxmin=None):
     rng = random.Random(seed)
 
     owner = {}                       # item -> user index
@@ -46,6 +59,18 @@ def generate(users, items_per_user, wants, money, bundle, seed, bundles_per_user
         return list(chosen)
 
     lines = []
+
+    # Cities (for the 'hubload' KPI): each user is placed by the given population weights,
+    # so one dominant hub city (e.g. CABA) plus a long tail is easy to reproduce.
+    if cities:
+        names = [c for c, _ in cities]
+        weights = [w for _, w in cities]
+        if hub:
+            lines.append(f"hub {hub}")
+        if boxmin is not None:
+            lines.append(f"boxmin {boxmin}")
+        for u in range(users):
+            lines.append(f"city u{u} {rng.choices(names, weights)[0]}")
 
     # Finite (deliberately tight) budgets for a money fraction of users; others stay infinite.
     if money:
@@ -116,10 +141,18 @@ def main():
     p.add_argument("--bundles", type=int, default=-1,
                    help="exact N-to-M bundle wishes per user (overrides --bundle if >= 0)")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--cities", default=None,
+                   help="place users in cities by weight, e.g. "
+                        "'CABA:45,GBA:20,Cordoba:10,SantaFe:8,Mendoza:6,Tucuman:5,Otros:6'")
+    p.add_argument("--hub", default=None, help="hub city name (emits 'hub <name>')")
+    p.add_argument("--boxmin", type=int, default=None,
+                   help="min items per direct box (emits 'boxmin <N>')")
     p.add_argument("--out", default="-", help="output file ('-' for stdout)")
     a = p.parse_args()
 
-    text = generate(a.users, a.items, a.wants, a.money, a.bundle, a.seed, a.bundles)
+    text = generate(a.users, a.items, a.wants, a.money, a.bundle, a.seed, a.bundles,
+                    cities=parse_cities(a.cities) if a.cities else None,
+                    hub=a.hub, boxmin=a.boxmin)
     if a.out == "-":
         sys.stdout.write(text)
     else:

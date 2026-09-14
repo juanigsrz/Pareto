@@ -20,7 +20,7 @@ def _header_lines(out):
 
 def test_header_present():
     lines = _header_lines(run_text(SWAP))
-    assert any(l.startswith("# pareto 1.0.0") for l in lines)
+    assert any(l.startswith("# pareto 1.1.0") for l in lines)
     assert any(l.startswith("# input_checksum") and "sha256:" in l for l in lines)
     assert any(l.startswith("# result_checksum") and "sha256:" in l for l in lines)
 
