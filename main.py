@@ -643,9 +643,14 @@ buys = list(buy.values())
 # instance it returns a visibly-suboptimal answer, and in a lexicographic --kpi solve it
 # can zero out the primary objective (dropping trades to 0 lets 'distance' pick 0 km / no
 # trades). So gate it: single-objective only, and only past a var-count threshold.
-# PARETO_GAPABS_MINVARS overrides the threshold; 0 disables the gap entirely.
+# "Single objective" means one Gurobi objective, not one KPI name: --blend collapses the
+# whole list into one weighted row, so it qualifies too, and the gap it gives up is a
+# unit of the BLENDED objective -- with weights >= 1 that is at most one hub item and
+# less than a whole trade. Testing len(--kpi) instead denied --blend the speedup on
+# exactly the huge instances it exists for.
 _gapabs_min = int(os.environ.get("PARETO_GAPABS_MINVARS", 20000))
-if _gapabs_min and len(_args.kpi) == 1 and len(swaps) + len(buys) >= _gapabs_min:
+if (_gapabs_min and (len(_args.kpi) == 1 or _args.blend is not None)
+        and len(swaps) + len(buys) >= _gapabs_min):
     model.Params.MIPGapAbs = 1 - 1e-6
 
 _time_limit = os.environ.get("PARETO_TIME_LIMIT")
@@ -694,8 +699,16 @@ if "users" in _args.kpi:
 #   * a candidate for a DIRECT BOX between two non-hub cities: the pair (a, b) ships one
 #     box straight to b only if it holds >= box_min items; otherwise every item in the pair
 #     goes through the hub. Per pair: binary B ("box is sent"), integer boxed = items it
-#     carries. flow >= K*B (a box needs K items); boxed <= flow; boxed <= |candidates|*B.
+#     carries. flow >= K*B (a box needs K items); boxed <= flow; boxed <= cap*B.
 #     Load for the pair = flow - boxed, so maximizing -load pushes boxed to flow when B=1.
+#
+#     cap is the number of DISTINCT copies the pair could move, not the number of
+#     candidate legs: several people in b may want the same copy in a, and a copy moves
+#     once, so leg count wildly overstates what a box can hold (on a real event, a pair
+#     with 7329 legs was backed by 262 copies). Sizing the big-M and boxed's domain off
+#     legs leaves both ~14x looser than anything reachable, and a pair with cap < K gets
+#     a gadget that provably can never fire -- its legs belong in the forced-hub term,
+#     where they also lift the root bound instead of relaxing to zero cost.
 # The derived plan (shipping_plan below) re-computes all of this from the solution.
 hub_terms = []        # (coeff, var): hub-processed items, minimized by 'hubload'
 box_pairs = {}        # (from_city, to_city) -> (flow_vars, B, boxed)
@@ -725,16 +738,18 @@ if "hubload" in _args.kpi:
         elif _a == hub_city or _b == hub_city:
             hub_terms.append((1, _v))
         else:
-            _pair_flow[(_a, _b)].append(_v)
-    for (_a, _b), _flow in sorted(_pair_flow.items()):
-        if len(_flow) < _BOX_MIN:                   # can never fill a box: all via hub
+            _pair_flow[(_a, _b)].append((_iid, _v))
+    for (_a, _b), _legs in sorted(_pair_flow.items()):
+        _flow = [v for _, v in _legs]
+        _cap = len({i for i, _ in _legs})           # distinct copies, not legs
+        if _cap < _BOX_MIN:                         # can never fill a box: all via hub
             hub_terms += [(1, v) for v in _flow]
             continue
         _B = model.addVar(vtype=GRB.BINARY)
-        _boxed = model.addVar(vtype=GRB.INTEGER, lb=0, ub=len(_flow))
+        _boxed = model.addVar(vtype=GRB.INTEGER, lb=0, ub=_cap)
         model.addConstr(gp.quicksum(_flow) >= _BOX_MIN * _B)
         model.addConstr(_boxed <= gp.quicksum(_flow))
-        model.addConstr(_boxed <= len(_flow) * _B)
+        model.addConstr(_boxed <= _cap * _B)
         box_pairs[(_a, _b)] = (_flow, _B, _boxed)
         hub_terms += [(1, v) for v in _flow]
         hub_terms.append((-1, _boxed))

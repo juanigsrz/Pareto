@@ -72,6 +72,10 @@ Options and environment variables:
 | `PARETO_STATS` | Print a `STATS …` line (vars, objective, gap, runtime) to stderr. |
 | `PARETO_FAST` | Aggressive pruning just to get a valid solution. Set it to the min accepted float in the LP relaxation. |
 | `PARETO_NOHUB` | Turn off HUB Optimization (groups up `A -> List`, `B -> List`, `dupcap List`) |
+| `PARETO_MIPFOCUS` | Gurobi `MIPFocus`. `1` chases incumbents instead of the bound — the right setting for `hubload`, whose root bound barely moves (see below). |
+| `PARETO_NORELHEUR` | Seconds of Gurobi's NoRel heuristic before the root relaxation. Finds a first solution on instances whose root LP is itself slow. |
+| `PARETO_METHOD` | Gurobi `Method` for the root LP (`1` = dual simplex, avoiding the costly barrier ordering). |
+| `PARETO_GAPABS_MINVARS` | Var-count threshold past which a single-objective solve may stop ~1 objective unit short (default 20000; `0` disables). |
 
 
 ## Input format
@@ -322,6 +326,21 @@ Two practical consequences: start with `--blend 3,1` (or `--kpi-tol 0.02` when
 the organizer wants a hard promise on volume), and remember that box formation
 depends on flow density far more than on the objective. Lower `boxmin` if the
 carrier allows it, and encourage more wants per participant.
+
+### Why `hubload` is slow, and what the gap means
+
+Expect `hubload` to take far longer than the same instance under `trades`, and
+expect the reported gap to look terrible long after the answer has stopped
+improving. A pair costs `flow` below `boxmin` and nothing at or above it, and
+the lower convex envelope of that step is flat zero — so in the root relaxation
+`B` goes fractional, `boxed` rises to meet `flow`, and every pair relaxes to
+zero load. The bound therefore starts at the forced-hub count and hardly moves;
+branch-and-bound closes the gap by exhausting the tree, not by the bound rising.
+No cut in these variables can fix that, it is the shape of the objective.
+
+In practice: run it with `PARETO_MIPFOCUS=1` and a `PARETO_TIME_LIMIT`, then
+take the incumbent and read the shipping plan. `PARETO_MIPGAP` is not useful
+here — it is measured against the bound that never moves.
 
 
 ## Examples

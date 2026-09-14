@@ -7,6 +7,7 @@ new directives in text and JSON, and input_checksum stability.
 Runs main.py as a subprocess (see README)."""
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -77,22 +78,42 @@ n: (1for1) N -> A4
 """
 
 
-def run(text, *extra, fmt="json"):
+def run(text, *extra, fmt="json", env=None):
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
         f.write(text)
         path = f.name
     try:
         r = subprocess.run([sys.executable, MAIN, path, "--format", fmt, *extra],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True,
+                           env={**os.environ, **env} if env else None)
     finally:
         os.unlink(path)
     return r
+
+
+def model_cols(text, *extra):
+    """Columns Gurobi is handed, straight off its log -- each box gadget adds 2."""
+    r = run(text, *extra, fmt="text")
+    assert r.returncode == 0, r.stderr
+    m = re.search(r"Optimize a model with \d+ rows, (\d+) columns", r.stdout)
+    assert m, r.stdout
+    return int(m.group(1))
 
 
 def solve(text, *extra):
     r = run(text, *extra)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
+
+
+# Six Mendoza users all chasing the SAME two Cordoba copies. The Cordoba -> Mendoza
+# pair has 12 candidate legs but only 2 copies behind them, and a copy moves once, so
+# no box can ever leave: sizing the gadget off legs builds one that cannot fire.
+FEW_COPIES = "\n".join(
+    ["hub CABA", "boxmin 5", "city a1 Cordoba", "city a2 Cordoba"]
+    + [f"city b{i} Mendoza" for i in range(1, 7)]
+    + ["a1: (1for1) A1 -> B1", "a2: (1for1) A2 -> B2"]
+    + [f"b{i}: (1for1) B{i} -> A1 A2" for i in range(1, 7)]) + "\n"
 
 
 def boxes(doc):
@@ -175,6 +196,31 @@ def test_input_checksum_is_stable_for_instances_without_cities():
     assert d["input_checksum"] == \
         "sha256:a36f3b882e164bc92101e152501c28be330fbac44b4e309d29ddd3ca3ef5b164"
     assert "shipping" not in d
+
+
+def test_pair_short_on_copies_builds_no_box_gadget():
+    d = solve(FEW_COPIES, "--kpi", "trades,hubload")
+    assert d["kpi"] == {"trades": 4, "hubload": 4}
+    assert boxes(d) == [] and d["shipping"]["hub_items"] == 4
+    # At boxmin 2 both pairs can fill a box and each gets a gadget (2 columns apiece);
+    # at boxmin 5 neither can, so neither may be built. Counting legs instead of copies
+    # would build one for the 12-leg pair and leave only a 2-column gap.
+    wide = FEW_COPIES.replace("boxmin 5", "boxmin 2")
+    assert model_cols(wide, "--kpi", "trades,hubload") \
+        == model_cols(FEW_COPIES, "--kpi", "trades,hubload") + 4
+    d = solve(wide, "--kpi", "trades,hubload")
+    assert d["kpi"] == {"trades": 4, "hubload": 0}
+    assert boxes(d) == [("Cordoba", "Mendoza", 2), ("Mendoza", "Cordoba", 2)]
+
+
+def test_blend_qualifies_for_the_absolute_gap_shortcut():
+    """--blend is ONE Gurobi objective, so it may stop ~1 objective unit short; a
+    lexicographic list may not (the gap can zero out the primary objective)."""
+    env = {"PARETO_GAPABS_MINVARS": "1"}    # default 20000 vars, far above these tests
+    r = run(FEW_COPIES, "--kpi", "trades,hubload", "--blend", "3,1", fmt="text", env=env)
+    assert "MIPGapAbs" in r.stdout, r.stdout
+    r = run(FEW_COPIES, "--kpi", "trades,hubload", fmt="text", env=env)
+    assert "MIPGapAbs" not in r.stdout, r.stdout
 
 
 def test_hubload_first_is_rejected():
