@@ -370,6 +370,42 @@ for t in test_*.py; do python "$t" || break; done
 checksum contract; `test_check_exact.py` locks the checker's exact-NforM rule.
 
 
+## Importing a FastTradeMaximizer instance
+
+`ftm_to_pareto.py` converts an FTM wants file, plus a `name;user;location`
+CSV, into a Pareto instance carrying the `city` / `hub` / `boxmin` directives
+`hubload` needs:
+
+```bash
+python ftm_to_pareto.py wants.txt users.csv out.txt [out_items.csv] [--cities=A,B]
+python verify_conversion.py wants.txt users.csv out.txt   # must print "equivalent"
+```
+
+`--cities` keeps only participants from the named cities, which is how you cut
+a full event down to something a size-limited licence will solve.
+
+FTM **dummy items are not copied across**. A dummy is owned by the user who
+lists it, so `A -> %G` is a take-leg on an item its own wisher owns — exactly
+what the sanitizer above drops, which would delete every want group in the
+file. They are rewritten instead as the equivalent pattern Pareto models
+natively, one 1for1 wish per (offered item, group) plus a `dupcap`:
+
+```
+(U) A : %G ...            U : (1for1) A -> X1 X2 ...
+(U) %G : X1 X2 ...   ->   U : (1for1) B -> X1 X2 ...
+(U) B : %G ...            dupcap U X1 X2 ...
+```
+
+Both readings say "at most one copy out of the group reaches U, and it costs U
+one of the items that asked for it", and this is the shape the hub-and-spoke
+compaction collapses, so the expanded wish list costs no extra variables.
+
+Copies that can never move are pruned: a copy whose owner filed no want line
+can never be given, so nothing can be given for it either, and that cascades.
+`verify_conversion.py` re-derives the FTM graph and asserts that every surviving
+item may receive exactly the copies it could before, that no want group was
+lost, and that every pruned copy really was unreachable.
+
 ## Benchmarking
 
 Generate random instances and sweep solver scaling:
