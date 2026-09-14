@@ -10,7 +10,7 @@ import gurobipy as gp
 from gurobipy import GRB
 import pareto_io
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 item_to_id = {}
 id_to_item = {}
@@ -23,6 +23,10 @@ bids = {}     # (user, item_id) -> Y_ui (max cash the user will pay)
 take_groups = []  # list of (user, N, [item_id, ...]); user receives <= N of these copies
 give_groups = []  # list of (user, N, [item_id, ...]); user gives <= N of these copies
 location = {}  # user -> (lat, lng) in degrees
+city = {}      # user -> city name; feeds the 'hubload' KPI and the shipping plan
+hub_city = None   # city that centralizes shipping ('hub <city>'); required by 'hubload'
+box_min = None    # min items for a direct city->city box ('boxmin <N>'; default below)
+DEFAULT_BOX_MIN = 5
 
 
 def warn(msg):
@@ -78,6 +82,7 @@ def parse_wish_body(body, line):
 
 # Handle input
 def parse_text(text):
+    global hub_city, box_min
     for raw in text.splitlines(keepends=True):
         line = raw.partition('#')[0].strip()
         if not line:
@@ -91,6 +96,9 @@ def parse_text(text):
         m_dup = re.fullmatch(r'dupcap\s+(\S+)\s+(.+)', line)
         m_loc = re.fullmatch(
             r'location\s+(\S+)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)', line)
+        m_city = re.fullmatch(r'city\s+(\S+)\s+(.+)', line)      # name may contain spaces
+        m_hub = re.fullmatch(r'hub\s+(.+)', line)
+        m_boxmin = re.fullmatch(r'boxmin\s+(\d+)', line)
 
         if m_user:
             users.add(m_user.group(1))
@@ -131,6 +139,14 @@ def parse_text(text):
                 raise ValueError(f"longitude out of range [-180, 180]: {raw}")
             users.add(u)
             location[u] = (lat, lng)
+        elif m_city:
+            u = m_city.group(1)
+            users.add(u)
+            city[u] = m_city.group(2).strip()
+        elif m_hub:
+            hub_city = m_hub.group(1).strip()
+        elif m_boxmin:
+            box_min = int(m_boxmin.group(1))
         elif ':' in line:
             u, _, body = line.partition(':')
             u = u.strip()
@@ -145,6 +161,7 @@ def parse_text(text):
 
 
 def parse_json_input(obj):
+    global hub_city, box_min
     for u in obj.get("budgets", []):
         users.add(u["user"]); budget[u["user"]] = int(u["budget"])
     for it in obj.get("items", []):
@@ -162,6 +179,12 @@ def parse_json_input(obj):
         if not (-180 <= lng <= 180):
             raise ValueError(f"longitude out of range [-180, 180]: {lo}")
         users.add(lo["user"]); location[lo["user"]] = (lat, lng)
+    for c in obj.get("cities", []):
+        users.add(c["user"]); city[c["user"]] = str(c["city"])
+    if obj.get("hub") is not None:
+        hub_city = str(obj["hub"])
+    if obj.get("box_min") is not None:
+        box_min = int(obj["box_min"])
     for c in obj.get("takecaps", []):
         users.add(c["user"])
         take_groups.append((c["user"], int(c["n"]),
@@ -196,6 +219,10 @@ def _post_parse_checks():
         if _iid not in owner:
             warn(f"cap references item '{id_to_item[_iid]}' with no declared owner "
                  f"(typo? it protects nothing)")
+    if box_min is not None and box_min < 1:
+        raise ValueError(f"boxmin must be >= 1, got {box_min}")
+    if hub_city is not None and hub_city not in set(city.values()):
+        warn(f"hub city '{hub_city}' has no users declared in it (typo?)")
 
 
 def _read_source(src):
@@ -221,7 +248,8 @@ def parse_file(_file):
 
 _argp = argparse.ArgumentParser()
 _argp.add_argument("file")
-ALLOWED_KPIS = ("trades", "users", "distance")
+ALLOWED_KPIS = ("trades", "users", "distance", "hubload")
+MIN_KPIS = ("distance", "hubload")   # minimized; negated into maximize form internally
 
 
 def parse_kpi_list(s):
@@ -237,14 +265,33 @@ def parse_kpi_list(s):
         if tok in kpis:
             raise argparse.ArgumentTypeError(f"duplicate KPI '{tok}'")
         kpis.append(tok)
-    # 'distance' as the first (or only) objective is degenerate: zero trades ships zero
-    # km, so the unconstrained optimum is to trade nothing. It only makes sense as a
-    # tie-breaker after a volume objective, so require it to follow 'trades' or 'users'.
-    if kpis and kpis[0] == "distance":
-        raise argparse.ArgumentTypeError(
-            "'distance' cannot be the first/only objective (degenerate: zero trades "
-            "gives zero distance); put it after 'trades' or 'users'")
     return kpis
+
+
+def parse_tol_list(s):
+    """Comma-separated relative tolerances in [0, 1), aligned with --kpi."""
+    out = []
+    for tok in s.split(","):
+        tok = tok.strip()
+        if not tok:
+            raise argparse.ArgumentTypeError("empty value in --kpi-tol")
+        x = float(tok)
+        if not (0 <= x < 1):
+            raise argparse.ArgumentTypeError(f"--kpi-tol values must be in [0, 1), got {tok}")
+        out.append(x)
+    return out
+
+
+def parse_weight_list(s):
+    """Comma-separated positive integer weights, aligned with --kpi."""
+    out = []
+    for tok in s.split(","):
+        tok = tok.strip()
+        if not re.fullmatch(r'\d+', tok) or int(tok) < 1:
+            raise argparse.ArgumentTypeError(
+                f"--blend weights must be positive integers, got {tok!r}")
+        out.append(int(tok))
+    return out
 
 
 _argp.add_argument("--kpi", type=parse_kpi_list, default=["trades"],
@@ -252,7 +299,21 @@ _argp.add_argument("--kpi", type=parse_kpi_list, default=["trades"],
                         "(leftmost optimized first), e.g. 'trades,users'. "
                         "Choices: 'trades' = max total trades (default); "
                         "'users' = max users with >= 1 trade; "
-                        "'distance' = min total shipping distance (km).")
+                        "'distance' = min total shipping distance (km); "
+                        "'hubload' = min items processed at the hub city "
+                        "(needs 'hub <city>' and 'city <user> <city>' directives).")
+_argp.add_argument("--kpi-tol", type=parse_tol_list, default=None,
+                   help="lexicographic only: comma-separated relative tolerances aligned "
+                        "with --kpi; objective k may degrade by at most this fraction of "
+                        "its optimum while the objectives after it are optimized, e.g. "
+                        "'--kpi trades,hubload --kpi-tol 0.05' gives up <= 5%% of trades "
+                        "to cut hub load. Default: strict (0).")
+_argp.add_argument("--blend", type=parse_weight_list, default=None,
+                   help="replace the lexicographic list with ONE weighted objective: "
+                        "comma-separated positive integer weights aligned with --kpi, "
+                        "e.g. '--kpi trades,hubload --blend 3,1' values a trade at 3 and "
+                        "each hub-processed item at -1 (min-KPIs are negated). Integer "
+                        "weights keep the objective integral, which Gurobi exploits.")
 _argp.add_argument("--format", choices=("text", "json"), default="text",
                    help="output format (default: text).")
 _argp.add_argument("--in-format", choices=("auto", "text", "json"), default="auto",
@@ -261,43 +322,58 @@ _argp.add_argument("--in-format", choices=("auto", "text", "json"), default="aut
 _args = _argp.parse_args()
 load_input(_args.file, _args.in_format)
 
+# Objective-list validation that needs the other flags or the parsed instance.
+if _args.blend is not None and len(_args.blend) != len(_args.kpi):
+    _argp.error(f"--blend needs one weight per --kpi entry ({len(_args.kpi)}), "
+                f"got {len(_args.blend)}")
+if _args.blend is not None and _args.kpi_tol is not None:
+    _argp.error("--blend and --kpi-tol are mutually exclusive (a blend is one weighted "
+                "objective; tolerances only apply to a lexicographic list)")
+if _args.kpi_tol is not None and len(_args.kpi_tol) >= len(_args.kpi):
+    _argp.error("--kpi-tol takes at most len(--kpi)-1 values (the last objective has "
+                "nothing below it to give way to)")
+# A minimized KPI as the first (or only) lexicographic objective is degenerate: zero
+# trades ships zero km / loads the hub with nothing, so the optimum is to trade nothing.
+# It only makes sense as a tie-breaker after a volume objective, or inside a --blend.
+if _args.blend is None and _args.kpi[0] in MIN_KPIS:
+    _argp.error(f"'{_args.kpi[0]}' cannot be the first/only lexicographic objective "
+                "(degenerate: zero trades minimizes it); put it after 'trades' or "
+                "'users', or combine with --blend")
+if "hubload" in _args.kpi and hub_city is None:
+    _argp.error("'hubload' needs the instance to name the hub city: 'hub <city>' "
+                "(JSON: \"hub\")")
+
 
 def normalized_input():
     """Canonical, format-independent view of the parsed instance for hashing.
-    Item ids are resolved to names; lists are sorted where order is semantically
-    irrelevant so equal instances hash equally regardless of source ordering."""
+    Re-expressed as the JSON input document and canonicalized by
+    pareto_io.normalize_instance, so text and JSON sources of the same instance
+    share a checksum -- and a consumer holding only pareto_io.py can recompute it."""
     def name(iid):
         return id_to_item[iid]
-    wishes_out = sorted(
-        ({"user": u, "give": sorted(name(g) for g in give),
-          "take": sorted(name(t) for t in take), "n": N, "m": M}
-         for (u, give, take, N, M) in wishes),
-        key=lambda w: (w["user"], w["give"], w["take"], w["n"], w["m"]))
-    items_out = sorted(
-        ({"name": name(iid), "owner": o, **({"ask": ask[iid]} if iid in ask else {})}
-         for iid, o in owner.items()),
-        key=lambda it: it["name"])
-    bids_out = sorted(
-        ({"user": u, "item": name(iid), "max_price": y}
-         for (u, iid), y in bids.items()),
-        key=lambda b: (b["user"], b["item"]))
-    budgets_out = sorted(
-        ({"user": u, "budget": b} for u, b in budget.items()),
-        key=lambda x: x["user"])
-    locations_out = sorted(
-        ({"user": u, "lat": lat, "lng": lng} for u, (lat, lng) in location.items()),
-        key=lambda x: x["user"])
-    takecaps_out = sorted(
-        ({"user": u, "n": n, "items": sorted(name(i) for i in iids)}
-         for (u, n, iids) in take_groups),
-        key=lambda x: (x["user"], x["n"], x["items"]))
-    givecaps_out = sorted(
-        ({"user": u, "n": n, "items": sorted(name(i) for i in iids)}
-         for (u, n, iids) in give_groups),
-        key=lambda x: (x["user"], x["n"], x["items"]))
-    return {"wishes": wishes_out, "items": items_out, "bids": bids_out,
-            "budgets": budgets_out, "locations": locations_out,
-            "takecaps": takecaps_out, "givecaps": givecaps_out}
+    doc = {
+        "wishes": [{"user": u, "give": [name(g) for g in give],
+                    "take": [name(t) for t in take], "n": N, "m": M}
+                   for (u, give, take, N, M) in wishes],
+        "items": [{"name": name(iid), "owner": o,
+                   **({"ask": ask[iid]} if iid in ask else {})}
+                  for iid, o in owner.items()],
+        "bids": [{"user": u, "item": name(iid), "max_price": y}
+                 for (u, iid), y in bids.items()],
+        "budgets": [{"user": u, "budget": b} for u, b in budget.items()],
+        "locations": [{"user": u, "lat": lat, "lng": lng}
+                      for u, (lat, lng) in location.items()],
+        "cities": [{"user": u, "city": c} for u, c in city.items()],
+        "takecaps": [{"user": u, "n": n, "items": [name(i) for i in iids]}
+                     for (u, n, iids) in take_groups],
+        "givecaps": [{"user": u, "n": n, "items": [name(i) for i in iids]}
+                     for (u, n, iids) in give_groups],
+    }
+    if hub_city is not None:
+        doc["hub"] = hub_city
+    if box_min is not None:
+        doc["box_min"] = box_min
+    return pareto_io.normalize_instance(doc)
 
 
 _input_checksum = pareto_io.checksum(normalized_input())
@@ -611,6 +687,61 @@ if "users" in _args.kpi:
         traded.append(t)
 
 
+# 'hubload' KPI: minimize the number of items the hub city has to process after the
+# event. Every item move ships from its owner's city to the receiver's city and is one of:
+#   * a LOCAL hand-off (same city)                         -> never touches the hub, load 0
+#   * HUB-PROCESSED: an endpoint is the hub, or the route is unknown (missing city) -> load 1
+#   * a candidate for a DIRECT BOX between two non-hub cities: the pair (a, b) ships one
+#     box straight to b only if it holds >= box_min items; otherwise every item in the pair
+#     goes through the hub. Per pair: binary B ("box is sent"), integer boxed = items it
+#     carries. flow >= K*B (a box needs K items); boxed <= flow; boxed <= |candidates|*B.
+#     Load for the pair = flow - boxed, so maximizing -load pushes boxed to flow when B=1.
+# The derived plan (shipping_plan below) re-computes all of this from the solution.
+hub_terms = []        # (coeff, var): hub-processed items, minimized by 'hubload'
+box_pairs = {}        # (from_city, to_city) -> (flow_vars, B, boxed)
+_BOX_MIN = box_min if box_min is not None else DEFAULT_BOX_MIN
+if "hubload" in _args.kpi:
+    _no_city = set()
+    _pair_flow = defaultdict(list)
+
+    def _all_moves():
+        for u, legs in spend_swap.items():          # swap receive-legs (simple + combo)
+            for iid, v in legs:
+                yield u, iid, v
+        for (u, iid), v in buy.items():             # cash buys
+            yield u, iid, v
+
+    for _u, _iid, _v in _all_moves():
+        _o = owner.get(_iid)
+        _a = city.get(_o) if _o is not None else None
+        _b = city.get(_u)
+        if _a is None or _b is None:
+            for _w in (_o, _u):
+                if _w is not None and _w not in city:
+                    _no_city.add(_w)
+            hub_terms.append((1, _v))
+        elif _a == _b:
+            continue
+        elif _a == hub_city or _b == hub_city:
+            hub_terms.append((1, _v))
+        else:
+            _pair_flow[(_a, _b)].append(_v)
+    for (_a, _b), _flow in sorted(_pair_flow.items()):
+        if len(_flow) < _BOX_MIN:                   # can never fill a box: all via hub
+            hub_terms += [(1, v) for v in _flow]
+            continue
+        _B = model.addVar(vtype=GRB.BINARY)
+        _boxed = model.addVar(vtype=GRB.INTEGER, lb=0, ub=len(_flow))
+        model.addConstr(gp.quicksum(_flow) >= _BOX_MIN * _B)
+        model.addConstr(_boxed <= gp.quicksum(_flow))
+        model.addConstr(_boxed <= len(_flow) * _B)
+        box_pairs[(_a, _b)] = (_flow, _B, _boxed)
+        hub_terms += [(1, v) for v in _flow]
+        hub_terms.append((-1, _boxed))
+    for _w in sorted(_no_city):
+        warn(f"user '{_w}' has no 'city'; their shipments count as hub-processed")
+
+
 _dist_cache = {}
 
 
@@ -658,18 +789,33 @@ def kpi_expr(kpi):
         return gp.quicksum(traded)
     if kpi == "distance":
         return -gp.quicksum(c * v for c, v in distance_terms())
+    if kpi == "hubload":
+        return -gp.quicksum(c * v for c, v in hub_terms)
     raise ValueError(f"unknown KPI: {kpi}")
 
 
-# Lexicographic multi-objective: leftmost KPI = highest priority. All objectives
-# share ModelSense; min-objectives (distance) are negated into maximize form.
+# Objectives. All share ModelSense; min-KPIs (distance, hubload) are negated into
+# maximize form. Three shapes:
+#   * one KPI:            plain objective;
+#   * --kpi a,b,c:        lexicographic (Gurobi hierarchical), leftmost = highest priority;
+#                         --kpi-tol lets objective k degrade by a fraction of its optimum
+#                         while the ones after it are optimized (Gurobi ObjNRelTol);
+#   * --blend w1,w2,...:  ONE weighted sum. Unlike a tolerance, a blend prices the
+#                         exchange rate explicitly (e.g. 3,1: a trade is worth three
+#                         hub-processed items), so it never spends a whole tolerance on
+#                         1-for-1 exchanges that barely help.
 model.ModelSense = GRB.MAXIMIZE
-if len(_args.kpi) == 1:
-    model.setObjective(kpi_expr(_args.kpi[0]), GRB.MAXIMIZE)
+_kpi_exprs = {k: kpi_expr(k) for k in _args.kpi}
+if _args.blend is not None:
+    model.setObjective(gp.quicksum(w * _kpi_exprs[k] for w, k in zip(_args.blend, _args.kpi)),
+                       GRB.MAXIMIZE)
+elif len(_args.kpi) == 1:
+    model.setObjective(_kpi_exprs[_args.kpi[0]], GRB.MAXIMIZE)
 else:
     n = len(_args.kpi)
     for k, kpi in enumerate(_args.kpi):
-        model.setObjectiveN(kpi_expr(kpi), index=k, priority=n - k)
+        tol = _args.kpi_tol[k] if (_args.kpi_tol and k < len(_args.kpi_tol)) else 0.0
+        model.setObjectiveN(_kpi_exprs[kpi], index=k, priority=n - k, reltol=tol)
 # Optional heuristic fast mode (PARETO_FAST): trade a proven optimum for a large
 # speedup on big, degenerate instances. The barter/budget LP relaxation is highly
 # degenerate -- its objective bound is reached almost instantly, but Gurobi then burns
@@ -682,8 +828,8 @@ else:
 # The relaxation objective is a valid bound, so the achieved gap is reported.
 fast_bound = None
 if os.environ.get("PARETO_FAST"):
-    if len(_args.kpi) > 1:
-        sys.exit("PARETO_FAST does not support multi-objective --kpi lists")
+    if len(_args.kpi) > 1 and _args.blend is None:
+        sys.exit("PARETO_FAST does not support lexicographic --kpi lists (use --blend)")
     
     print(f"\n--- PARETO_FAST: Aggressive LP Pruning ---", file=sys.stderr)
     _t0 = time.perf_counter()
@@ -729,19 +875,19 @@ if os.environ.get("PARETO_STATS"):
     have = model.SolCount > 0
     users_traded = (sum(1 for part in participation.values() if any(v.X > 0.5 for v in part))
                     if have else 0)
-    # ObjVal / MIPGap are unavailable under multi-objective; report per-objective
-    # values instead (distance is reported negated, i.e. in maximize form).
+    # MIPGap exists only for a single Gurobi objective (one KPI or a --blend). Under a
+    # lexicographic list report per-KPI values instead (min-KPIs in their natural sign).
+    _single_obj = len(_args.kpi) == 1 or _args.blend is not None
     if len(_args.kpi) == 1:
         obj_str = f"obj={model.ObjVal:.0f}" if have else "obj=nan"
-        gap = f"{model.MIPGap:.4f}" if have else "nan"
     else:
         parts = []
-        for k, kpi in enumerate(_args.kpi):
-            model.params.ObjNumber = k
-            val = f"{model.ObjNVal:.0f}" if have else "nan"
+        for kpi in _args.kpi:
+            raw = _kpi_exprs[kpi].getValue() if have else None
+            val = "nan" if raw is None else f"{(-raw if kpi in MIN_KPIS else raw):.0f}"
             parts.append(f"{kpi}={val}")
         obj_str = "obj[" + ",".join(parts) + "]"
-        gap = "nan"
+    gap = f"{model.MIPGap:.4f}" if (have and _single_obj) else "nan"
     print(
         f"STATS swap_vars={len(swaps)} buy_vars={len(buys)} combos={len(combo_records)} "
         f"items={len(real_item_ids)} users_traded={users_traded}/{len(users)} "
@@ -758,15 +904,51 @@ def kpi_values():
     if model.SolCount == 0:
         return {k: None for k in _args.kpi}
     vals = {}
-    if len(_args.kpi) == 1:
-        raw = model.ObjVal
-        vals[_args.kpi[0]] = int(round(-raw if _args.kpi[0] == "distance" else raw))
-    else:
-        for k, kpi in enumerate(_args.kpi):
-            model.params.ObjNumber = k
-            raw = model.ObjNVal
-            vals[kpi] = int(round(-raw if kpi == "distance" else raw))
+    for kpi in _args.kpi:
+        raw = _kpi_exprs[kpi].getValue()   # valid for single, lexicographic and blended solves
+        vals[kpi] = int(round(-raw if kpi in MIN_KPIS else raw))
     return vals
+
+
+def shipping_plan():
+    """Post-solve logistics derived purely from the chosen moves (independent of the
+    'hubload' model vars, so it doubles as a check on them). Each active move is a
+    local hand-off, part of a direct city->city box (>= box_min items, neither end the
+    hub), or hub-processed (an endpoint is the hub, the route is unknown, or the pair
+    fell short of a box)."""
+    K = box_min if box_min is not None else DEFAULT_BOX_MIN
+    moves = []
+    for u, legs in spend_swap.items():
+        for iid, v in legs:
+            if active(v):
+                moves.append((iid, owner[iid], u))
+    for (u, iid), v in buy.items():
+        if active(v):
+            moves.append((iid, owner[iid], u))
+    pair, via_hub, local = defaultdict(list), [], []
+    for iid, o, u in moves:
+        a, b = city.get(o), city.get(u)
+        rec = {"item": id_to_item[iid], "from_user": o, "to_user": u,
+               "from_city": a, "to_city": b}
+        if a is None or b is None or a == hub_city or b == hub_city:
+            via_hub.append(rec)
+        elif a == b:
+            local.append(rec)
+        else:
+            pair[(a, b)].append(rec)
+    boxes = []
+    for (a, b), recs in sorted(pair.items()):
+        if len(recs) >= K:
+            boxes.append({"from_city": a, "to_city": b,
+                          "items": sorted(r["item"] for r in recs)})
+        else:
+            via_hub.extend(recs)
+    key = lambda r: (r["item"], r["from_user"], r["to_user"])
+    via_hub.sort(key=key)
+    local.sort(key=key)
+    return {"hub": hub_city, "box_min": K, "boxes": boxes, "via_hub": via_hub,
+            "local": local, "boxed_items": sum(len(b["items"]) for b in boxes),
+            "hub_items": len(via_hub), "local_items": len(local)}
 
 
 def build_result():
@@ -850,13 +1032,23 @@ def build_result():
     settlement.sort(key=lambda p: (p["from"], p["to"]))
     # cash_summary is already built in sorted(users) order.
 
-    return {
+    result = {
         "status": status,
         "kpi": kpi_values(),
         "trades": trades, "combos": combos,
         "cash_purchases": cash_purchases, "cash_summary": cash_summary,
         "payments": payments, "settlement": settlement,
     }
+    if hub_city is not None:
+        plan = shipping_plan()
+        if "hubload" in result["kpi"] and result["kpi"]["hubload"] != plan["hub_items"]:
+            # Only possible when the solve stopped short (time limit / MIP gap): the
+            # boxed vars lag behind the flow they cap. The plan is the ground truth.
+            warn(f"hubload objective {result['kpi']['hubload']} != hub-processed items in "
+                 f"the derived plan {plan['hub_items']}; reporting the plan's value")
+            result["kpi"]["hubload"] = plan["hub_items"]
+        result["shipping"] = plan
+    return result
 
 
 def render_text(result, input_checksum=None):
@@ -891,6 +1083,15 @@ def render_text(result, input_checksum=None):
             out.append("\nSettlement plan:")
             for p in result["settlement"]:
                 out.append(f"  {p['from']} pays {p['to']} ${p['amount']:g}")
+    plan = result.get("shipping")
+    if plan:
+        out.append(f"\nShipping plan (hub {plan['hub']}, box >= {plan['box_min']} items):")
+        out.append(f"  Direct boxes: {len(plan['boxes'])} "
+                   f"({plan['boxed_items']} items bypass the hub)")
+        for b in plan["boxes"]:
+            out.append(f"    {b['from_city']} -> {b['to_city']}: {len(b['items'])} items")
+        out.append(f"  Via hub: {plan['hub_items']} items")
+        out.append(f"  Local hand-offs: {plan['local_items']} items")
     return "\n".join(out) + "\n"
 
 

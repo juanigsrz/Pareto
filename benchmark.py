@@ -1,7 +1,7 @@
 """Sweep instance sizes and report solver scaling.
 
-Generates instances with generate_testcase.generate, runs main.py with a HiGHS time limit,
-and tabulates variable counts, solver runtime (HiGHS), and wall time (incl. Python build).
+Generates instances with generate_testcase.generate, runs main.py with a Gurobi time limit,
+and tabulates variable counts, solver runtime, and wall time (incl. Python build).
 Stops a sweep once a solve fails to prove optimality within the time limit.
 
 Usage:

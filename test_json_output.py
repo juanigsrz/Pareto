@@ -21,7 +21,7 @@ def run_json(path, *extra):
 
 def test_json_has_metadata():
     d = run_json(SWAP)
-    assert d["version"] == "1.0.0"
+    assert d["version"] == "1.1.0"
     assert d["input_checksum"].startswith("sha256:")
     assert d["result_checksum"].startswith("sha256:")
     assert "gurobi_version" in d

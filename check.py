@@ -124,8 +124,9 @@ def parse_output(text):
         if line in ("Trade Results:", "Cash Purchases:"):
             section = line
             continue
-        if line in ("Cash Summary:", "Payments:", "Settlement plan:"):
-            section = "ignore"
+        if line in ("Cash Summary:", "Payments:", "Settlement plan:") \
+                or line.startswith("Shipping plan"):
+            section = "ignore"   # derived reporting; 'City -> City: N items' is not a move
             continue
         if not line:
             continue
@@ -244,9 +245,13 @@ def check(inst, swap_moves, cash_moves):
 
 
 def _backing_wish(wishes, u, given, received):
+    """A move is backed by a wish of `u` when its given/received items are subsets
+    of the wish's give/take lists AND the counts are exactly N and M -- the same
+    semantics the solver enforces (sum(out) == N*active, sum(in) == M*active).
+    'NforM' means give exactly N, receive exactly M, not 'up to'/'at least'."""
     g, r = set(given), set(received)
     for wu, wgive, wtake, N, M in wishes:
-        if wu == u and g <= set(wgive) and r <= set(wtake) and len(given) <= N and len(received) >= M:
+        if wu == u and g <= set(wgive) and r <= set(wtake) and len(given) == N and len(received) == M:
             return True
     return False
 
